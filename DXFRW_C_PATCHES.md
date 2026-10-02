@@ -176,9 +176,19 @@ Găsite prin măsurarea a ceea ce rămânea necitit în cele 9.735 de DWG-uri al
 
 Rezultat pe lot: **toate cele 9.735 de DWG-uri se citesc complet** (0 PARTIAL, față de 66), fără referințe de bloc rupte și fără blocuri duplicate.
 
-### Test al bibliotecii actualizat
+### Tipurile de linie din DXF (2 octombrie 2026)
+
+Găsită la trecerea aplicației BatchPrint de la IxMilia.Dxf la DxfRw, prin compararea desenelor randate cu cele două biblioteci.
+
+| Problemă | Efect | Fișiere |
+|---|---|---|
+| `DRW_LType::reset()` nu golea lista elementelor (codul 49), iar `dxfRW::processLType` folosește același obiect pentru tot tabelul LTYPE | Fiecare tip de linie dintr-un DXF moștenea elementele tuturor tipurilor de dinaintea lui: model și lungime (40) greșite, iar un tip fără elemente (linie continuă) devenea întrerupt. Afecta 597 din cele 1.871 de DXF-uri ale lotului; DWG-ul nu era afectat (acolo fiecare tip de linie e un obiect nou) | `drw_objects.h` |
+
+### Teste ale bibliotecii actualizate
 
 `tests/test_attributes.cpp` verifica explicit vechea limitare („scara de linetype nu se scrie, trebuie să rămână 1.0”). Acum verifică faptul că valoarea 2.5 se păstrează.
+
+`tests/test_tables.cpp` (`testLineTypes`) număra doar tipurile de linie recitite; acum verifică și modelul fiecăruia (cu vechiul `reset()`, `DOTTED` ieșea cu elementele lui `DASHED`).
 
 ## Corecturi făcute în shim (nu în bibliotecă)
 

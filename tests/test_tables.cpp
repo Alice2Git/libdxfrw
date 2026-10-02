@@ -14,6 +14,10 @@
 #include "test_interface.h"
 #include <iostream>
 #include <cstdio>
+#include <cmath>
+#include <map>
+#include <string>
+#include <vector>
 
 bool testLayerDefinitions() {
     std::cout << "\n=== Test: Layer Definitions ===" << std::endl;
@@ -168,7 +172,19 @@ bool testLineTypes() {
     // Read and verify
     {
         dxfRW dxf(filename);
-        TestInterface reader;
+        // patch dxfrw_c: also checks each pattern; processLType reuses one DRW_LType for the
+        // whole table, so a missing path.clear() in reset() made DOTTED inherit DASHED's elements
+        class LineTypeReader : public TestInterface {
+        public:
+            virtual void addLType(const DRW_LType& data) {
+                TestInterface::addLType(data);
+                patterns[data.name] = data.path;
+                lengths[data.name] = data.length;
+            }
+            std::map<std::string, std::vector<double> > patterns;
+            std::map<std::string, double> lengths;
+        };
+        LineTypeReader reader;
         if (!dxf.read(&reader, false)) {
             std::cout << "✗ Failed to read line types" << std::endl;
             std::remove(filename);
@@ -177,6 +193,18 @@ bool testLineTypes() {
 
         if (reader.ltypeCount < 2) {  // At least 2 line types
             std::cout << "✗ Expected at least 2 line types, got " << reader.ltypeCount << std::endl;
+            std::remove(filename);
+            return false;
+        }
+
+        const std::vector<double> dashed = {0.5, -0.25};
+        const std::vector<double> dotted = {0.0, -0.25};
+        if (reader.patterns["DASHED"] != dashed || reader.patterns["DOTTED"] != dotted
+            || !reader.patterns["CONTINUOUS"].empty()
+            || std::fabs(reader.lengths["DOTTED"] - 0.25) > 1e-9) {
+            std::cout << "✗ Line type patterns read back wrong (DASHED " << reader.patterns["DASHED"].size()
+                      << ", DOTTED " << reader.patterns["DOTTED"].size() << ", CONTINUOUS "
+                      << reader.patterns["CONTINUOUS"].size() << " elements)" << std::endl;
             std::remove(filename);
             return false;
         }

@@ -246,6 +246,9 @@ public:
         size = 0;
         length = 0.0;
         pathIdx = 0;
+        /* patch dxfrw_c: dxfRW::processLType refoloseste acelasi obiect pentru toate LTYPE-urile
+           din DXF; fara golire, fiecare tip de linie mostenea elementele (49) celor de dinainte */
+        path.clear();
         DRW_TableEntry::reset();
     }
 
