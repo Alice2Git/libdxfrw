@@ -1650,6 +1650,9 @@ bool DRW_MText::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     DRW_DBG("Insertion: "); DRW_DBGPT(basePoint.x, basePoint.y, basePoint.z); DRW_DBG("\n");
     extPoint = buf->get3BitDouble(); /* Extrusion 3BD 210 Undocumented; */
     secPoint = buf->get3BitDouble(); /* X-axis dir 3BD 11 */
+    /* patch dxfrw_c: in DWG directia axei X exista mereu; fara steag, updateAngle nu facea nimic si
+       orice MTEXT citit din DWG avea rotatia 0 (textele verticale ieseau orizontale) */
+    haveXAxis = true;
     updateAngle();
     widthscale = buf->getBitDouble(); /* Rect width BD 41 */
     if (version > DRW::AC1018) {//2007+

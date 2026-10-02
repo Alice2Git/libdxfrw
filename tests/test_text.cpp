@@ -12,9 +12,14 @@
 
 #include "libdxfrw.h"
 #include "test_interface.h"
+#include "intern/dwgbuffer.h"
+#include "intern/drw_textcodec.h"
 #include <iostream>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
+#include <vector>
 
 bool testSingleLineText() {
     std::cout << "\n=== Test: Single Line Text ===" << std::endl;
@@ -255,6 +260,127 @@ bool testTextWithDifferentHeights() {
     return true;
 }
 
+// patch dxfrw_c: the rotation of an MTEXT read from a DWG must come from its X-axis direction.
+// DRW_MText::parseDwg read the direction but never set haveXAxis, so every MTEXT from a DWG had
+// rotation 0. The entity is built here bit by bit in the R2000 format (no DWG file needed).
+namespace {
+
+// Writes a DWG bit stream: bits MSB first, raw multi-byte values little-endian.
+class DwgBitWriter {
+public:
+    std::vector<duint8> bytes;
+
+    void bit(int v) {
+        if (pos == 0) bytes.push_back(0);
+        if (v) bytes.back() |= static_cast<duint8>(0x80 >> pos);
+        pos = (pos + 1) & 7;
+    }
+    void bits(unsigned v, int n) { for (int i = n - 1; i >= 0; --i) bit((v >> i) & 1); }
+    void rc(duint8 v) { bits(v, 8); }
+    void rs(duint16 v) { rc(v & 0xFF); rc(v >> 8); }
+    void rl(duint32 v) { rs(v & 0xFFFF); rs(v >> 16); }
+    void rd(double d) {
+        duint8 raw[8];
+        std::memcpy(raw, &d, 8);
+        for (int i = 0; i < 8; ++i) rc(raw[i]);
+    }
+    void bs(duint16 v) {                       // BS: 10 = 0, 01 = one byte, 00 = two bytes
+        if (v == 0) bits(2, 2);
+        else if (v < 256) { bits(1, 2); rc(static_cast<duint8>(v)); }
+        else { bits(0, 2); rs(v); }
+    }
+    void bd(double d) {                        // BD: 10 = 0.0, 01 = 1.0, 00 = raw double
+        if (d == 0.0) bits(2, 2);
+        else if (d == 1.0) bits(1, 2);
+        else { bits(0, 2); rd(d); }
+    }
+    void bd3(double x, double y, double z) { bd(x); bd(y); bd(z); }
+    void handle(duint8 code, duint8 ref) {     // H: code|size, then the reference bytes
+        if (ref == 0) { rc(static_cast<duint8>(code << 4)); return; }
+        rc(static_cast<duint8>((code << 4) | 1));
+        rc(ref);
+    }
+    void text(const std::string& s) {          // TV up to R2004: BS length + bytes
+        bs(static_cast<duint16>(s.size()));
+        for (char c : s) rc(static_cast<duint8>(c));
+    }
+
+private:
+    int pos = 0;
+};
+
+class MTextProbe : public DRW_MText {
+public:
+    bool parse(DRW::Version v, dwgBuffer* buf) { return parseDwg(v, buf, 0); }
+};
+
+}  // namespace
+
+bool testDwgMTextRotation() {
+    std::cout << "\n=== Test: MTEXT rotation read from DWG ===" << std::endl;
+
+    // a vertical MTEXT (X axis = 0,1,0) and one at 30 degrees
+    const double dirs[2][2] = {{0.0, 1.0}, {std::cos(M_PI / 6), std::sin(M_PI / 6)}};
+    const double expected[2] = {90.0, 30.0};
+
+    for (int k = 0; k < 2; ++k) {
+        DwgBitWriter w;
+        // common entity data (R2000)
+        w.bs(44);                   // object type MTEXT
+        w.rl(0);                    // object size in bits (not used for R2000)
+        w.handle(0, 0x2A);          // entity handle
+        w.bs(0);                    // no extended data
+        w.bit(0);                   // no proxy graphics
+        w.bits(2, 2);               // entity mode: model space
+        w.bs(0);                    // reactors
+        w.bit(1);                   // no prev/next links
+        w.bs(7);                    // color
+        w.bd(1.0);                  // linetype scale
+        w.bits(0, 2);               // linetype ByLayer
+        w.bits(0, 2);               // plot style ByLayer
+        w.bs(0);                    // visible
+        w.rc(29);                   // lineweight
+        // MTEXT data
+        w.bd3(10.0, 20.0, 0.0);     // insertion point
+        w.bd3(0.0, 0.0, 1.0);       // extrusion
+        w.bd3(dirs[k][0], dirs[k][1], 0.0);  // X-axis direction
+        w.bd(50.0);                 // reference rectangle width
+        w.bd(2.5);                  // text height
+        w.bs(7);                    // attachment: bottom left
+        w.bs(1);                    // drawing direction
+        w.bd(2.5);                  // extents height
+        w.bd(10.0);                 // extents width
+        w.text("733");
+        w.bs(1);                    // line spacing style
+        w.bd(1.0);                  // line spacing factor
+        w.bit(0);                   // unknown bit
+        // handles
+        w.handle(3, 0);             // extension dictionary (none)
+        w.handle(5, 0x10);          // layer
+        w.handle(5, 0x11);          // text style
+        for (int pad = 0; pad < 8; ++pad) w.rc(0);
+
+        DRW_TextCodec codec;
+        dwgBuffer buf(w.bytes.data(), static_cast<int>(w.bytes.size()), &codec);
+        MTextProbe mtext;
+        if (!mtext.parse(DRW::AC1015, &buf)) {
+            std::cout << "✗ MTEXT bit stream not parsed" << std::endl;
+            return false;
+        }
+        if (mtext.text != "733" || std::fabs(mtext.height - 2.5) > 1e-9) {
+            std::cout << "✗ MTEXT fields read back wrong: '" << mtext.text << "', height " << mtext.height << std::endl;
+            return false;
+        }
+        if (std::fabs(mtext.angle - expected[k]) > 1e-9) {
+            std::cout << "✗ MTEXT rotation " << mtext.angle << ", expected " << expected[k] << std::endl;
+            return false;
+        }
+    }
+
+    std::cout << "✓ MTEXT rotation from DWG test passed" << std::endl;
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     std::cout << "libdxfrw Text Entity Tests" << std::endl;
     std::cout << "==========================" << std::endl;
@@ -273,6 +399,9 @@ int main(int argc, char* argv[]) {
 
     totalTests++;
     if (!testTextWithDifferentHeights()) failedTests++;
+
+    totalTests++;
+    if (!testDwgMTextRotation()) failedTests++;
 
     std::cout << "\n==========================" << std::endl;
     std::cout << "Tests: " << (totalTests - failedTests) << "/" << totalTests << " passed" << std::endl;

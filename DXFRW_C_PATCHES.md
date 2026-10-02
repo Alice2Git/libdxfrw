@@ -176,19 +176,24 @@ Găsite prin măsurarea a ceea ce rămânea necitit în cele 9.735 de DWG-uri al
 
 Rezultat pe lot: **toate cele 9.735 de DWG-uri se citesc complet** (0 PARTIAL, față de 66), fără referințe de bloc rupte și fără blocuri duplicate.
 
-### Tipurile de linie din DXF (2 octombrie 2026)
+### Găsite prin aplicația BatchPrint (2 octombrie 2026)
 
-Găsită la trecerea aplicației BatchPrint de la IxMilia.Dxf la DxfRw, prin compararea desenelor randate cu cele două biblioteci.
+Găsite la trecerea aplicației BatchPrint de la IxMilia.Dxf la DxfRw: prima prin compararea desenelor randate cu cele două biblioteci, a doua prin compararea unei planșe tipărite cu AutoCAD.
 
 | Problemă | Efect | Fișiere |
 |---|---|---|
 | `DRW_LType::reset()` nu golea lista elementelor (codul 49), iar `dxfRW::processLType` folosește același obiect pentru tot tabelul LTYPE | Fiecare tip de linie dintr-un DXF moștenea elementele tuturor tipurilor de dinaintea lui: model și lungime (40) greșite, iar un tip fără elemente (linie continuă) devenea întrerupt. Afecta 597 din cele 1.871 de DXF-uri ale lotului; DWG-ul nu era afectat (acolo fiecare tip de linie e un obiect nou) | `drw_objects.h` |
+| MTEXT din DWG: direcția axei X era citită, dar steagul `haveXAxis` (pus doar la citirea DXF, codul 11) rămânea fals, așa că `updateAngle()` nu calcula unghiul | Orice MTEXT citit dintr-un DWG avea rotația 0: textele verticale ieșeau orizontale, iar numerele din bulinele de poziție ieșeau în afara lor | `drw_entities.cpp` |
+
+La scriere, rotația MTEXT rămâne în codul 50, în grade. Referința DXF spune radiani, dar AutoCAD folosește grade (la fel tratează codul și ezdxf); AutoCAD însuși scrie vectorul axei X (11/21/31).
 
 ### Teste ale bibliotecii actualizate
 
 `tests/test_attributes.cpp` verifica explicit vechea limitare („scara de linetype nu se scrie, trebuie să rămână 1.0”). Acum verifică faptul că valoarea 2.5 se păstrează.
 
 `tests/test_tables.cpp` (`testLineTypes`) număra doar tipurile de linie recitite; acum verifică și modelul fiecăruia (cu vechiul `reset()`, `DOTTED` ieșea cu elementele lui `DASHED`).
+
+`tests/test_text.cpp` are un test nou, `testDwgMTextRotation`: construiește bit cu bit două entități MTEXT în format DWG R2000 (verticală și la 30°) și verifică rotația citită, fără să aibă nevoie de un fișier DWG.
 
 ## Corecturi făcute în shim (nu în bibliotecă)
 
