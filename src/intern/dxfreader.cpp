@@ -14,9 +14,15 @@
 #include <fstream>
 #include <string>
 #include <sstream>
+#include <cstring>
 #include "dxfreader.h"
 #include "drw_textcodec.h"
 #include "drw_dbg.h"
+
+/* patch dxfrw_c */
+bool dxfReader::isGood() const {
+    return filestr->good();
+}
 
 bool dxfReader::readRec(int *codeData) {
 //    std::string text;
@@ -135,42 +141,39 @@ bool dxfReaderBinary::readString(std::string *text) {
 
 bool dxfReaderBinary::readInt16() {
     type = INT32;
-    char buffer[2];
-    filestr->read(buffer,2);
-    intData = (int)((buffer[1] << 8) | buffer[0]);
+    unsigned char buffer[2] = {0, 0};
+    filestr->read(reinterpret_cast<char*>(buffer),2);
+    /* patch dxfrw_c: cu char cu semn, octetul inferior >= 0x80 se extindea (192 devenea -64) */
+    intData = static_cast<short>(static_cast<unsigned short>((buffer[1] << 8) | buffer[0]));
     DRW_DBG(intData); DRW_DBG("\n");
     return (filestr->good());
 }
 
 bool dxfReaderBinary::readInt32() {
     type = INT32;
-    unsigned int *int32p;
-    char buffer[4];
+    char buffer[4] = {0, 0, 0, 0};
     filestr->read(buffer,4);
-    int32p = (unsigned int *) buffer;
-    intData = *int32p;
+    unsigned int v32; /* patch dxfrw_c: memcpy in loc de cast de pointer (aliniere/aliasing) */
+    memcpy(&v32, buffer, 4);
+    intData = static_cast<int>(v32);
     DRW_DBG(intData); DRW_DBG("\n");
     return (filestr->good());
 }
 
 bool dxfReaderBinary::readInt64() {
     type = INT64;
-    unsigned long long int *int64p; //64 bits integer pointer
-    char buffer[8];
+    char buffer[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     filestr->read(buffer,8);
-    int64p = (unsigned long long int *) buffer;
-    int64 = *int64p;
+    memcpy(&int64, buffer, 8); /* patch dxfrw_c */
     DRW_DBG(int64); DRW_DBG(" int64\n");
     return (filestr->good());
 }
 
 bool dxfReaderBinary::readDouble() {
     type = DOUBLE;
-    double *result;
-    char buffer[8];
+    char buffer[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     filestr->read(buffer,8);
-    result = (double *) buffer;
-    doubleData = *result;
+    memcpy(&doubleData, buffer, 8); /* patch dxfrw_c */
     DRW_DBG(doubleData); DRW_DBG("\n");
     return (filestr->good());
 }

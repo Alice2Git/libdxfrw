@@ -44,7 +44,8 @@ void DRW_TableEntry::parseCode(int code, dxfReader *reader){
     case 1003:
     case 1004:
     case 1005:
-        extData.push_back(new DRW_Variant(code, reader->getString()));
+        /* patch dxfrw_c: la fel ca la entitati, sirurile XDATA se decodeaza */
+        extData.push_back(new DRW_Variant(code, reader->getUtf8String()));
         break;
     case 1010:
     case 1011:
@@ -140,7 +141,7 @@ DRW_DBG("\n***************************** parsing table entry *******************
             DRW_DBG(" strLength: "); DRW_DBG(strLength);
             duint16 cp = tmpExtDataBuf.getBERawShort16();
             DRW_DBG(" str codepage: "); DRW_DBG(cp);
-            for (int i=0;i< strLength+1;i++) {//string length + null terminating char
+            for (int i=0; (i< strLength+1) && buf->isGood();i++) {//string length + null terminating char
                 duint8 dxfChar = tmpExtDataBuf.getRawChar8();
                 DRW_DBG(" dxfChar: "); DRW_DBG(dxfChar);
             }
@@ -390,6 +391,13 @@ void DRW_Dimstyle::parseCode(int code, dxfReader *reader){
     case 344:
         dimblk2 = reader->getUtf8String();
         break;
+    /* patch dxfrw_c: DIMLWD / DIMLWE erau scrise (371 / 372), dar nu si citite */
+    case 371:
+        dimlwd = reader->getInt32();
+        break;
+    case 372:
+        dimlwe = reader->getInt32();
+        break;
     default:
         DRW_TableEntry::parseCode(code, reader);
         break;
@@ -494,7 +502,7 @@ bool DRW_LType::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     DRW_DBG(" num dashes, size: "); DRW_DBG(size);
     DRW_DBG("\n    dashes:\n");
     bool haveStrArea = false;
-    for (int i=0; i< size; i++){
+    for (int i=0; (i< size) && buf->isGood(); i++){
         path.push_back(buf->getBitDouble());
         /*int bs1 =*/ buf->getBitShort();
         /*double d1= */buf->getRawDouble();
@@ -539,7 +547,7 @@ bool DRW_LType::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     DRW_DBG("linetype control Handle: "); DRW_DBGHL(ltControlH.code, ltControlH.size, ltControlH.ref);
     parentHandle = ltControlH.ref;
     DRW_DBG("\n Remaining bytes: "); DRW_DBG(buf->numRemainingBytes()); DRW_DBG("\n");
-    for (int i=0; i< numReactors;++i) {
+    for (int i=0; (i< numReactors) && buf->isGood();++i) {
         dwgHandle reactorsH = buf->getHandle();
         DRW_DBG(" reactorsH control Handle: "); DRW_DBGHL(reactorsH.code, reactorsH.size, reactorsH.ref); DRW_DBG("\n");
     }
@@ -620,7 +628,7 @@ bool DRW_Layer::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
         flags |= buf->getBit(); //layer frozen
         /*flags |=*/ buf->getBit(); //unused, negate the color
         flags |= buf->getBit() << 1;//frozen in new
-        flags |= buf->getBit()<< 3;//locked
+        flags |= buf->getBit()<< 2;//locked (patch dxfrw_c: era << 3, bit 8 nedefinit in loc de 4 = blocat)
     }
     if (version > DRW::AC1014) {//2000+
         dint16 f = buf->getSBitShort();//bit2 are layer on
@@ -702,6 +710,9 @@ bool DRW_Block_Record::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs
     DRW_DBG("flags: "); DRW_DBG(flags); DRW_DBG(", ");
     if (version > DRW::AC1015) {//2004+ fails in 2007
         objectCount = buf->getBitLong(); //Number of objects owned by this block
+        /* patch dxfrw_c: fiecare handle ocupa cel putin un octet; nu se rezerva mai mult decat exista */
+        if (static_cast<duint64>(objectCount) > static_cast<duint64>(buf->size()))
+            return false;
         entMap.reserve(objectCount);
     }
     basePoint.x = buf->getBitDouble();
@@ -713,13 +724,13 @@ bool DRW_Block_Record::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs
 
     if (version > DRW::AC1014) {//2000+
         insertCount = 0;
-        while (duint8 i = buf->getRawChar8() != 0)
-            insertCount +=i;
+        while (buf->isGood() && buf->getRawChar8() != 0) /* patch dxfrw_c */
+            insertCount += 1;
         UTF8STRING bkdesc = sBuf->getVariableText(version, false);
         DRW_DBG("Block description: "); DRW_DBG(bkdesc.c_str()); DRW_DBG("\n");
 
         duint32 prevData = buf->getBitLong();
-        for (unsigned int j= 0; j < prevData; ++j)
+        for (unsigned int j= 0; (j < prevData) && buf->isGood(); ++j)
             buf->getRawChar8();
     }
     if (version > DRW::AC1018) {//2007+
@@ -741,7 +752,7 @@ bool DRW_Block_Record::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs
     DRW_DBG("block control Handle: "); DRW_DBGHL(blockControlH.code, blockControlH.size, blockControlH.ref); DRW_DBG("\n");
     parentHandle = blockControlH.ref;
 
-    for (int i=0; i<numReactors; i++){
+    for (int i=0; (i<numReactors) && buf->isGood(); i++){
         dwgHandle reactorH = buf->getHandle();
         DRW_DBG(" reactor Handle #"); DRW_DBG(i); DRW_DBG(": "); DRW_DBGHL(reactorH.code, reactorH.size, reactorH.ref); DRW_DBG("\n");
     }
@@ -758,7 +769,7 @@ bool DRW_Block_Record::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs
     block = blockH.ref;
 
     if (version > DRW::AC1015) {//2004+
-        for (unsigned int i=0; i< objectCount; i++){
+        for (unsigned int i=0; (i< objectCount) && buf->isGood(); i++){
             dwgHandle entityH = buf->getHandle();
             DRW_DBG(" entityH Handle #"); DRW_DBG(i); DRW_DBG(": "); DRW_DBGHL(entityH.code, entityH.size, entityH.ref); DRW_DBG("\n");
             entMap.push_back(entityH.ref);
@@ -779,7 +790,7 @@ bool DRW_Block_Record::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs
     endBlock = endBlockH.ref;
 
     if (version > DRW::AC1014) {//2000+
-        for (unsigned int i=0; i< insertCount; i++){
+        for (unsigned int i=0; (i< insertCount) && buf->isGood(); i++){
             dwgHandle insertsH = buf->getHandle();
             DRW_DBG(" insertsH Handle #"); DRW_DBG(i); DRW_DBG(": "); DRW_DBGHL(insertsH.code, insertsH.size, insertsH.ref); DRW_DBG("\n");
         }
@@ -842,7 +853,8 @@ bool DRW_Textstyle::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     name = sBuf->getVariableText(version, false);
     DRW_DBG("text style name: "); DRW_DBG(name.c_str()); DRW_DBG("\n");
     flags |= buf->getBit()<< 6;//style are referenced for a entity, style code 70, bit 7 (64)
-    /*dint16 xrefindex =*/ buf->getBitShort();
+    if (version < DRW::AC1021) /* patch dxfrw_c: xrefindex nu exista in DWG 2007+ (valorile urmatoare se decalau) */
+        buf->getBitShort();
     flags |= buf->getBit() << 4; //is refx dependent, style code 70, bit 5 (16)
     flags |= buf->getBit() << 2; //vertical text, stile code 70, bit 3 (4)
     flags |= buf->getBit(); //if is a shape file instead of text, style code 70, bit 1 (1)
@@ -1000,7 +1012,8 @@ bool DRW_Vport::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     DRW_DBG("vport name: "); DRW_DBG(name.c_str()); DRW_DBG("\n");
     flags |= buf->getBit()<< 6;// code 70, bit 7 (64)
     if (version < DRW::AC1021) { //2004-
-        /*dint16 xrefindex =*/ buf->getBitShort();
+        if (version < DRW::AC1021) /* patch dxfrw_c: xrefindex nu exista in DWG 2007+ (valorile urmatoare se decalau) */
+            buf->getBitShort();
     }
     flags |= buf->getBit() << 4; //is refx dependent, style code 70, bit 5 (16)
     height = buf->getBitDouble();
@@ -1206,7 +1219,8 @@ bool DRW_AppId::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     name = sBuf->getVariableText(version, false);
     DRW_DBG("appId name: "); DRW_DBG(name.c_str()); DRW_DBG("\n");
     flags |= buf->getBit()<< 6;// code 70, bit 7 (64)
-    /*dint16 xrefindex =*/ buf->getBitShort();
+    if (version < DRW::AC1021) /* patch dxfrw_c: xrefindex nu exista in DWG 2007+ (valorile urmatoare se decalau) */
+        buf->getBitShort();
     flags |= buf->getBit() << 4; //is refx dependent, style code 70, bit 5 (16)
     duint8 unknown = buf->getRawChar8(); // unknown code 71
     DRW_DBG("unknown code 71: "); DRW_DBG(unknown); DRW_DBG("\n");

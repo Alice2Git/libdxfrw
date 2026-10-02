@@ -33,6 +33,7 @@ public:
     }
     virtual ~dxfReader(){}
     bool readRec(int *code);
+    bool isGood() const; /* patch dxfrw_c */
 
     std::string getString() {return strData;}
     int getHandleString();//Convert hex string to int

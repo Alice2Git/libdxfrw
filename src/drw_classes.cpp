@@ -110,6 +110,8 @@ void DRW_Class::toDwgType(){
         dwgType = 101;
     else if (recName == "IMAGEDEF")
         dwgType = 102;
+    else if (recName == "MULTILEADER") /* patch dxfrw_c: tip intern (nu exista un numar DWG fix) */
+        dwgType = 103;
     else
         dwgType =0;
 }

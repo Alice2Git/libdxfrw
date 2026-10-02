@@ -14,6 +14,7 @@
 #include "drw_entities.h"
 #include "intern/dxfreader.h"
 #include "intern/dwgbuffer.h"
+#include "intern/drw_textcodec.h" /* patch dxfrw_c: decodarea XDATA din DWG */
 #include "intern/drw_dbg.h"
 
 
@@ -89,14 +90,17 @@ bool DRW_Entity::parseCode(int code, dxfReader *reader){
     case 48:
         ltypeScale = reader->getDouble();
         break;
-    case 60:
-        visible = reader->getBool();
+    case 60: /* patch dxfrw_c: 60=1 inseamna invizibil */
+        visible = !reader->getBool();
         break;
     case 420:
         color24 = reader->getInt32();
         break;
     case 430:
         colorName = reader->getString();
+        break;
+    case 440: /* patch dxfrw_c: transparency */
+        transparency = reader->getInt32();
         break;
     case 67:
         space = static_cast<DRW::Space>(reader->getInt32());
@@ -110,7 +114,9 @@ bool DRW_Entity::parseCode(int code, dxfReader *reader){
     case 1003:
     case 1004:
     case 1005:
-        extData.push_back(new DRW_Variant(code, reader->getString()));
+        /* patch dxfrw_c: sirurile XDATA erau citite fara decodare (in fisierele pana la R2004 textul
+           ne-ASCII ramanea sub forma \U+XXXX sau in code page-ul fisierului), desi se scriu codate */
+        extData.push_back(new DRW_Variant(code, reader->getUtf8String()));
         break;
     case 1010:
     case 1011:
@@ -234,31 +240,17 @@ bool DRW_Entity::parseDwg(DRW::Version version, dwgBuffer *buf, dwgBuffer* strBu
     dint16 extDataSize = buf->getBitShort(); //BS
     DRW_DBG(" ext data size: "); DRW_DBG(extDataSize);
     while (extDataSize>0 && buf->isGood()) {
-        /* RLZ: TODO */
         dwgHandle ah = buf->getHandle();
         DRW_DBG("App Handle: "); DRW_DBGHL(ah.code, ah.size, ah.ref);
+        /* patch dxfrw_c: datele extinse (XDATA) din DWG erau sarite (doar primul sir era parcurs, fara
+           a fi pastrat), deci se pierdeau la conversia DWG -> DXF. Acum se decodeaza toate tipurile de
+           valori. Numele aplicatiei (1001) si numele layerului (1003) sunt referinte la tabele; aici se
+           pastreaza handle-ul ca intreg, iar dwgReader::parseAttribs le inlocuieste cu numele. */
+        if (extDataSize > buf->numRemainingBytes())
+            return false;
         duint8 *tmpExtData = new duint8[extDataSize];
         buf->getBytes(tmpExtData, extDataSize);
-        dwgBuffer tmpExtDataBuf(tmpExtData, extDataSize, buf->decoder);
-
-        duint8 dxfCode = tmpExtDataBuf.getRawChar8();
-        DRW_DBG(" dxfCode: "); DRW_DBG(dxfCode);
-        switch (dxfCode){
-        case 0:{
-            duint8 strLength = tmpExtDataBuf.getRawChar8();
-            DRW_DBG(" strLength: "); DRW_DBG(strLength);
-            duint16 cp = tmpExtDataBuf.getBERawShort16();
-            DRW_DBG(" str codepage: "); DRW_DBG(cp);
-            for (int i=0;i< strLength+1;i++) {//string length + null terminating char
-                duint8 dxfChar = tmpExtDataBuf.getRawChar8();
-                DRW_DBG(" dxfChar: "); DRW_DBG(dxfChar);
-            }
-            break;
-        }
-        default:
-            /* RLZ: TODO */
-            break;
-        }
+        parseDwgExtData(version, tmpExtData, extDataSize, ah.ref, buf->decoder);
         delete[]tmpExtData;
         extDataSize = buf->getBitShort(); //BS
         DRW_DBG(" ext data size: "); DRW_DBG(extDataSize);
@@ -266,8 +258,15 @@ bool DRW_Entity::parseDwg(DRW::Version version, dwgBuffer *buf, dwgBuffer* strBu
     duint8 graphFlag = buf->getBit(); //B
     DRW_DBG(" graphFlag: "); DRW_DBG(graphFlag); DRW_DBG("\n");
     if (graphFlag) {
-        duint32 graphDataSize = buf->getRawLong32();  //RL 32bits
+        /* patch dxfrw_c: din R2010 dimensiunea graficii proxy este BLL, nu RL; citita ca RL, restul
+           entitatii era decalat (de ex. orice MULTILEADER din DWG 2010+ era nedecodat) */
+        duint64 graphDataSize64 = (version > DRW::AC1021) ? buf->getBitLongLong() : buf->getRawLong32();
+        if (graphDataSize64 > 0x7FFFFFFFULL) /* patch dxfrw_c */
+            return false;
+        duint32 graphDataSize = static_cast<duint32>(graphDataSize64);
         DRW_DBG("graphData in bytes: "); DRW_DBG(graphDataSize); DRW_DBG("\n");
+        if (!buf->isGood() || graphDataSize > static_cast<duint32>(buf->numRemainingBytes())) /* patch dxfrw_c */
+            return false;
 // RLZ: TODO
         //skip graphData bytes
         duint8 *tmpGraphData = new duint8[graphDataSize];
@@ -355,6 +354,7 @@ bool DRW_Entity::parseDwg(DRW::Version version, dwgBuffer *buf, dwgBuffer* strBu
         DRW_DBG("unknown bit: "); DRW_DBG(unk); DRW_DBG("\n");
     }
     dint16 invisibleFlag = buf->getBitShort(); //BS
+    visible = (invisibleFlag == 0); /* patch dxfrw_c */
     DRW_DBG(" invisibleFlag: "); DRW_DBG(invisibleFlag);
     if (version > DRW::AC1014) {//2000+
         lWeight = DRW_LW_Conv::dwgInt2lineWidth( buf->getRawChar8() ); //RC
@@ -366,6 +366,99 @@ bool DRW_Entity::parseDwg(DRW::Version version, dwgBuffer *buf, dwgBuffer* strBu
 //        DRW_DBG("unknown bit: "); DRW_DBG(unk); DRW_DBG("\n");
 //    }
     return buf->isGood();
+}
+
+/* patch dxfrw_c: decodeaza un bloc de date extinse (EED) din DWG in lista extData, in aceeasi forma
+   ca la citirea DXF (1001 nume aplicatie, apoi valorile 1000-1071). Formatul unei valori: un octet cu
+   codul DXF minus 1000, urmat de date:
+     0  sir: pana la R2004 RC lungime + RS code page + octetii sirului; din R2007 RS lungime + UTF-16
+     2  RC: 0 = "{", 1 = "}"
+     3  8 octeti: handle-ul layerului (rezolvat in nume de dwgReader::parseAttribs)
+     4  RC lungime + octetii datelor binare (in DXF se scriu in hexazecimal)
+     5  8 octeti: handle de entitate (in DXF se scrie in hexazecimal)
+     10-13  3 RD;  40-42  RD;  70  RS;  71  RL
+   Returneaza true daca blocul a fost consumat exact (structura recunoscuta in intregime). */
+bool DRW_Entity::parseDwgExtData(DRW::Version version, duint8 *data, int size, duint32 appHandle,
+                                 DRW_TextCodec *decoder){
+    static const char hex[] = "0123456789ABCDEF";
+    dwgBuffer b(data, size, decoder);
+    std::vector<DRW_Variant*> items;
+    items.push_back(new DRW_Variant(1001, static_cast<dint32>(appHandle)));
+    bool ok = true;
+    while (ok && b.numRemainingBytes() > 0) {
+        int code = b.getRawChar8();
+        switch (code) {
+        case 0: {
+            std::string s;
+            if (version > DRW::AC1018) {
+                duint16 len = b.getRawShort16();
+                if (len * 2 > b.numRemainingBytes()) { ok = false; break; }
+                std::string raw(len * 2, '\0');
+                if (len > 0) b.getBytes(reinterpret_cast<duint8*>(&raw[0]), len * 2);
+                s = decoder ? decoder->toUtf8(raw) : raw;
+            } else {
+                duint8 len = b.getRawChar8();
+                b.getBERawShort16(); //code page, se foloseste cel al desenului
+                if (len > b.numRemainingBytes()) { ok = false; break; }
+                std::string raw(len, '\0');
+                if (len > 0) b.getBytes(reinterpret_cast<duint8*>(&raw[0]), len);
+                s = decoder ? decoder->toUtf8(raw) : raw;
+            }
+            items.push_back(new DRW_Variant(1000, s));
+            break; }
+        case 2:
+            items.push_back(new DRW_Variant(1002, std::string(b.getRawChar8() == 0 ? "{" : "}")));
+            break;
+        case 3:
+            items.push_back(new DRW_Variant(1003, static_cast<dint32>(b.getRawLong64())));
+            break;
+        case 4: {
+            duint8 len = b.getRawChar8();
+            if (len > b.numRemainingBytes()) { ok = false; break; }
+            std::string s;
+            for (int i = 0; i < len; ++i) {
+                duint8 c = b.getRawChar8();
+                s += hex[c >> 4];
+                s += hex[c & 15];
+            }
+            items.push_back(new DRW_Variant(1004, s));
+            break; }
+        case 5: {
+            duint64 h = b.getRawLong64();
+            std::string s;
+            do { s.insert(s.begin(), hex[h & 15]); h >>= 4; } while (h != 0);
+            items.push_back(new DRW_Variant(1005, s));
+            break; }
+        case 10: case 11: case 12: case 13: {
+            DRW_Coord c;
+            c.x = b.getRawDouble();
+            c.y = b.getRawDouble();
+            c.z = b.getRawDouble();
+            items.push_back(new DRW_Variant(1000 + code, c));
+            break; }
+        case 40: case 41: case 42:
+            items.push_back(new DRW_Variant(1000 + code, b.getRawDouble()));
+            break;
+        case 70:
+            items.push_back(new DRW_Variant(1070, static_cast<dint32>(static_cast<dint16>(b.getRawShort16()))));
+            break;
+        case 71:
+            items.push_back(new DRW_Variant(1071, static_cast<dint32>(b.getRawLong32())));
+            break;
+        default:
+            ok = false;
+            break;
+        }
+        if (!b.isGood())
+            ok = false;
+    }
+    if (!ok) { //structura necunoscuta: blocul se ignora in intregime, ca inainte
+        for (size_t i = 0; i < items.size(); ++i)
+            delete items[i];
+        return false;
+    }
+    extData.insert(extData.end(), items.begin(), items.end());
+    return true;
 }
 
 bool DRW_Entity::parseDwgEntHandle(DRW::Version version, dwgBuffer *buf){
@@ -384,7 +477,7 @@ bool DRW_Entity::parseDwgEntHandle(DRW::Version version, dwgBuffer *buf){
         DRW_DBG("NO Block (parent) Handle\n");
 
     DRW_DBG("\n Remaining bytes: "); DRW_DBG(buf->numRemainingBytes()); DRW_DBG("\n");
-    for (int i=0; i< numReactors;++i) {
+    for (int i=0; (i< numReactors) && buf->isGood();++i) {
         dwgHandle reactorsH = buf->getHandle();
         DRW_DBG(" reactorsH control Handle: "); DRW_DBGHL(reactorsH.code, reactorsH.size, reactorsH.ref); DRW_DBG("\n");
     }
@@ -1092,19 +1185,26 @@ bool DRW_Insert::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     DRW_DBG("   Remaining bytes: "); DRW_DBG(buf->numRemainingBytes()); DRW_DBG("\n");
 
     /*attribs follows*/
+    /* patch dxfrw_c: handle-urile atributelor erau citite si aruncate; se pastreaza, iar dwgReader citeste
+       atributele. Contorul era de tip duint8 (cel mult 255 de atribute) si referintele erau citite ca
+       absolute, desi pot fi relative la handle-ul insertiei. */
+    hasAttribs = hasAttrib;
     if (hasAttrib) {
         if (version < DRW::AC1018) {//2000-
-            dwgHandle attH = buf->getHandle(); /* H 2 BLOCK HEADER (hard pointer) */
+            dwgHandle attH = buf->getOffsetHandle(handle);
+            firstAttribH = attH.ref;
             DRW_DBG("first attrib Handle: "); DRW_DBGHL(attH.code, attH.size, attH.ref); DRW_DBG("\n");
-            attH = buf->getHandle(); /* H 2 BLOCK HEADER (hard pointer) */
+            attH = buf->getOffsetHandle(handle);
+            lastAttribH = attH.ref;
             DRW_DBG("second attrib Handle: "); DRW_DBGHL(attH.code, attH.size, attH.ref); DRW_DBG("\n");
         } else {
-            for (duint8 i=0; i< objCount; ++i){
-                dwgHandle attH = buf->getHandle(); /* H 2 BLOCK HEADER (hard pointer) */
+            for (dint32 i=0; (i< objCount) && buf->isGood(); ++i){
+                dwgHandle attH = buf->getOffsetHandle(handle);
+                attribHandles.push_back(attH.ref);
                 DRW_DBG("attrib Handle #"); DRW_DBG(i); DRW_DBG(": "); DRW_DBGHL(attH.code, attH.size, attH.ref); DRW_DBG("\n");
             }
         }
-        seqendH = buf->getHandle(); /* H 2 BLOCK HEADER (hard pointer) */
+        seqendH = buf->getOffsetHandle(handle);
         DRW_DBG("seqendH Handle: "); DRW_DBGHL(seqendH.code, seqendH.size, seqendH.ref); DRW_DBG("\n");
     }
     DRW_DBG("   Remaining bytes: "); DRW_DBG(buf->numRemainingBytes()); DRW_DBG("\n");
@@ -1228,7 +1328,7 @@ bool DRW_LWPolyline::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
         vertex->y = buf->getRawDouble();
         vertlist.push_back(vertex);
         DRW_Vertex2D* pv = vertex;
-        for (int i = 1; i< vertexnum; i++){
+        for (int i = 1; (i< vertexnum) && buf->isGood(); i++){
             vertex = new DRW_Vertex2D();
             if (version < DRW::AC1015) {//14-
                 vertex->x = buf->getRawDouble();
@@ -1242,14 +1342,14 @@ bool DRW_LWPolyline::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
             vertlist.push_back(vertex);
         }
         //add bulges
-        for (unsigned int i = 0; i < bulgesnum; i++){
+        for (unsigned int i = 0; (i < bulgesnum) && buf->isGood(); i++){
             double bulge = buf->getBitDouble();
             if (vertlist.size()> i)
                 vertlist.at(i)->bulge = bulge;
         }
         //add vertexId
         if (version > DRW::AC1021) {//2010+
-            for (int i = 0; i < vertexIdCount; i++){
+            for (int i = 0; (i < vertexIdCount) && buf->isGood(); i++){
                 dint32 vertexId = buf->getBitLong();
                 //TODO implement vertexId, do not exist in dxf
                 DRW_UNUSED(vertexId);
@@ -1258,7 +1358,7 @@ bool DRW_LWPolyline::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
             }
         }
         //add widths
-        for (unsigned int i = 0; i < widthsnum; i++){
+        for (unsigned int i = 0; (i < widthsnum) && buf->isGood(); i++){
             double staW = buf->getBitDouble();
             double endW = buf->getBitDouble();
             if (vertlist.size()< i) {
@@ -1331,7 +1431,24 @@ bool DRW_Text::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     if (!ret)
         return ret;
     DRW_DBG("\n***************************** parsing text *********************************************\n");
+    if (!parseDwgTextBody(version, buf, sBuf))
+        return false;
 
+    /* Common Entity Handle Data */
+    ret = DRW_Entity::parseDwgEntHandle(version, buf);
+    if (!ret)
+        return ret;
+
+    styleH = buf->getHandle(); /* H 7 STYLE (hard pointer) */
+    DRW_DBG("text style Handle: "); DRW_DBGHL(styleH.code, styleH.size, styleH.ref); DRW_DBG("\n");
+
+    /* CRC X --- */
+    return buf->isGood();
+}
+
+/* patch dxfrw_c: datele proprii ale textului, separate de DRW_Text::parseDwg pentru a fi refolosite de
+   ATTRIB/ATTDEF (care continua cu campurile atributului inainte de handle-uri) */
+bool DRW_Text::parseDwgTextBody(DRW::Version version, dwgBuffer *buf, dwgBuffer *sBuf){
  // DataFlags RC Used to determine presence of subsquent data, set to 0xFF for R14-
     duint8 data_flags = 0x00;
     if (version > DRW::AC1014) {//2000+
@@ -1398,16 +1515,101 @@ bool DRW_Text::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
         DRW_DBG(", alignV: "); DRW_DBG(alignV);
     }
     DRW_DBG("\n");
+    return buf->isGood();
+}
 
-    /* Common Entity Handle Data */
+/* patch dxfrw_c: citirea ATTRIB/ATTDEF din DXF. In AcDbAttribute codul 73 este lungimea campului si 74
+   alinierea verticala (la TEXT, 73 este alinierea verticala). Codul 280 apare de doua ori din R2010:
+   inainte de eticheta (versiunea clasei, ignorata) si dupa ea (blocarea pozitiei). Dupa codul 101
+   urmeaza un MTEXT incorporat (atribute multi-linie), ale carui coduri nu apartin atributului. */
+void DRW_Attrib::parseCode(int code, dxfReader *reader){
+    if (embeddedMText)
+        return;
+    /* in subclasa AcDbAttribute(Definition), 71 este tipul atributului (R2018) si 72 un indicator
+       intern; nu sunt generarea si alinierea textului (acestea sunt in AcDbText) */
+    if (inAttribSubclass && (code == 71 || code == 72))
+        return;
+    switch (code) {
+    case 100:
+        if (reader->getString().compare(0, 13, "AcDbAttribute") == 0)
+            inAttribSubclass = true;
+        break;
+    case 101:
+        embeddedMText = true;
+        break;
+    case 2:
+        tag = reader->getUtf8String();
+        haveTag = true;
+        break;
+    case 3:
+        prompt = reader->getUtf8String();
+        break;
+    case 70:
+        flags = reader->getInt32();
+        break;
+    case 73:
+        fieldLength = reader->getInt32();
+        break;
+    case 74:
+        alignV = (VAlign)reader->getInt32();
+        break;
+    case 280:
+        if (haveTag)
+            lockPosition = reader->getInt32() != 0;
+        break;
+    default:
+        DRW_Text::parseCode(code, reader);
+        break;
+    }
+}
+
+/* patch dxfrw_c: citirea ATTRIB (tip 2) si ATTDEF (tip 3) din DWG. Dupa datele textului urmeaza:
+   R2010+ versiunea clasei (RC); R2018+ tipul atributului (RC: 1 un rand, 2/4 multi-linie, cu MTEXT
+   incorporat - nesuportat, obiectul se raporteaza ca nedecodat); eticheta (TV); lungimea campului
+   (BS); flag-urile (RC); R2007+ blocarea pozitiei (B). ATTDEF continua cu R2010+ versiunea (RC) si
+   textul de cerere (TV). Apoi handle-urile comune si stilul de text. */
+bool DRW_Attrib::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
+    dwgBuffer sBuff = *buf;
+    dwgBuffer *sBuf = buf;
+    if (version > DRW::AC1018) {//2007+
+        sBuf = &sBuff; //separate buffer for strings
+    }
+    bool ret = DRW_Entity::parseDwg(version, buf, sBuf, bs);
+    if (!ret)
+        return ret;
+    DRW_DBG("\n***************************** parsing attrib/attdef *************************************\n");
+    if (!parseDwgTextBody(version, buf, sBuf))
+        return false;
+    if (version > DRW::AC1021) {//2010+
+        duint8 classVersion = buf->getRawChar8();
+        DRW_DBG("class version: "); DRW_DBG(classVersion); DRW_DBG("\n");
+    }
+    if (version > DRW::AC1027) {//2018+
+        duint8 attType = buf->getRawChar8();
+        DRW_DBG("attribute type: "); DRW_DBG(attType); DRW_DBG("\n");
+        if (attType > 1)
+            return false;
+    }
+    tag = sBuf->getVariableText(version, false);
+    fieldLength = buf->getBitShort();
+    flags = buf->getRawChar8();
+    if (version > DRW::AC1018) {//2007+
+        lockPosition = buf->getBit() != 0;
+    }
+    if (eType == DRW::ATTDEF) {
+        if (version > DRW::AC1021) {//2010+
+            duint8 defVersion = buf->getRawChar8();
+            DRW_DBG("attdef version: "); DRW_DBG(defVersion); DRW_DBG("\n");
+        }
+        prompt = sBuf->getVariableText(version, false);
+    }
+    DRW_DBG("tag: "); DRW_DBG(tag.c_str()); DRW_DBG(" flags: "); DRW_DBG(flags); DRW_DBG("\n");
+
     ret = DRW_Entity::parseDwgEntHandle(version, buf);
     if (!ret)
         return ret;
-
     styleH = buf->getHandle(); /* H 7 STYLE (hard pointer) */
     DRW_DBG("text style Handle: "); DRW_DBGHL(styleH.code, styleH.size, styleH.ref); DRW_DBG("\n");
-
-    /* CRC X --- */
     return buf->isGood();
 }
 
@@ -1606,7 +1808,7 @@ bool DRW_Polyline::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
         DRW_DBG(" last Vertex Handle: "); DRW_DBGHL(objectH.code, objectH.size, objectH.ref); DRW_DBG("\n");
         DRW_DBG("Remaining bytes: "); DRW_DBG(buf->numRemainingBytes()); DRW_DBG("\n");
     } else {
-        for (dint32 i = 0; i < ooCount; ++i){
+        for (dint32 i = 0; (i < ooCount) && buf->isGood(); ++i){
                 dwgHandle objectH = buf->getOffsetHandle(handle);
                 hadlesList.push_back (objectH.ref);
                 DRW_DBG(" Vertex Handle: "); DRW_DBGHL(objectH.code, objectH.size, objectH.ref); DRW_DBG("\n");
@@ -1682,8 +1884,11 @@ bool DRW_Vertex::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs, doub
         else
             endwidth = buf->getBitDouble();
         bulge = buf->getBitDouble();
-        if (version > DRW::AC1021) //2010+
+        if (version > DRW::AC1021) { //2010+
+            /* patch dxfrw_c: fara acolade, ID-ul vertexului (BL, doar din 2010) era citit la toate
+               versiunile, iar directia tangentei se citea decalat in DWG R2000..R2007 */
             DRW_DBG("Vertex ID: "); DRW_DBG(buf->getBitLong());
+        }
         tgdir = buf->getBitDouble();
     } else if (oType == 0x0B || oType == 0x0C || oType == 0x0D) { //PFACE
         flags = buf->getRawChar8(); //RLZ: EC  unknown type
@@ -1728,8 +1933,12 @@ void DRW_Hatch::parseCode(int code, dxfReader *reader){
             addSpline();
         }
         break;
+    /* patch dxfrw_c: geometria muchiilor spline (72 = 4) era ignorata la citirea din DXF: muchia
+       ramanea fara noduri si puncte. Codurile ei: 94 grad, 73 rationala, 74 periodica, 40 noduri,
+       10/20 puncte de control, 42 ponderi, 11/21 puncte de trecere, 12/22 si 13/23 tangente. */
     case 10:
         if (pt) pt->basePoint.x = reader->getDouble();
+        else if (spline) spline->controllist.push_back(new DRW_Coord(reader->getDouble(), 0.0, 0.0));
         else if (pline) {
             plvert = pline->addVertex();
             plvert->x = reader->getDouble();
@@ -1737,25 +1946,48 @@ void DRW_Hatch::parseCode(int code, dxfReader *reader){
         break;
     case 20:
         if (pt) pt->basePoint.y = reader->getDouble();
+        else if (spline) { if (!spline->controllist.empty()) spline->controllist.back()->y = reader->getDouble(); }
         else if (plvert) plvert ->y = reader->getDouble();
         break;
     case 11:
         if (line) line->secPoint.x = reader->getDouble();
         else if (ellipse) ellipse->secPoint.x = reader->getDouble();
+        else if (spline) spline->fitlist.push_back(new DRW_Coord(reader->getDouble(), 0.0, 0.0));
         break;
     case 21:
         if (line) line->secPoint.y = reader->getDouble();
         else if (ellipse) ellipse->secPoint.y = reader->getDouble();
+        else if (spline && !spline->fitlist.empty()) spline->fitlist.back()->y = reader->getDouble();
+        break;
+    case 12:
+        if (spline) spline->tgStart.x = reader->getDouble();
+        break;
+    case 22:
+        if (spline) spline->tgStart.y = reader->getDouble();
+        break;
+    case 13:
+        if (spline) spline->tgEnd.x = reader->getDouble();
+        break;
+    case 23:
+        if (spline) spline->tgEnd.y = reader->getDouble();
         break;
     case 40:
         if (arc) arc->radious = reader->getDouble();
         else if (ellipse) ellipse->ratio = reader->getDouble();
+        else if (spline) spline->knotslist.push_back(reader->getDouble());
         break;
     case 41:
         scale = reader->getDouble();
         break;
     case 42:
         if (plvert) plvert ->bulge = reader->getDouble();
+        else if (spline && !spline->controllist.empty()) spline->controllist.back()->z = reader->getDouble();
+        break;
+    case 94:
+        if (spline) spline->degree = reader->getInt32();
+        break;
+    case 74:
+        if (spline && reader->getInt32()) spline->flags |= 2;   /* periodica */
         break;
     case 50:
         if (arc) arc->staangle = reader->getDouble()/ARAD;
@@ -1770,6 +2002,9 @@ void DRW_Hatch::parseCode(int code, dxfReader *reader){
         break;
     case 73:
         if (arc) arc->isccw = reader->getInt32();
+        /* patch dxfrw_c: sensul muchiei-elipsa si indicatorul "rationala" al muchiei spline nu erau citite */
+        else if (ellipse) ellipse->isccw = reader->getInt32();
+        else if (spline) { if (reader->getInt32()) spline->flags |= 4; }
         else if (pline) pline->flags = reader->getInt32();
         break;
     case 75:
@@ -1783,6 +2018,28 @@ void DRW_Hatch::parseCode(int code, dxfReader *reader){
         break;
     case 78:
         deflines = reader->getInt32();
+        break;
+    /* patch dxfrw_c: definitia modelului; o linie noua incepe la fiecare cod 53 */
+    case 53:
+        patternLines.push_back(DRW_HatchPatternLine());
+        patternLines.back().angle = reader->getDouble();
+        break;
+    case 43:
+        if (!patternLines.empty()) patternLines.back().base.x = reader->getDouble();
+        break;
+    case 44:
+        if (!patternLines.empty()) patternLines.back().base.y = reader->getDouble();
+        break;
+    case 45:
+        if (!patternLines.empty()) patternLines.back().offset.x = reader->getDouble();
+        break;
+    case 46:
+        if (!patternLines.empty()) patternLines.back().offset.y = reader->getDouble();
+        break;
+    case 79:
+        break;
+    case 49:
+        if (!patternLines.empty()) patternLines.back().dashes.push_back(reader->getDouble());
         break;
     case 91:
         loopsnum = reader->getInt32();
@@ -1841,7 +2098,7 @@ bool DRW_Hatch::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
         DRW_DBG(" Gradient tint: "); DRW_DBG(gradTint);
         dint32 numCol = buf->getBitLong();
         DRW_DBG(" num colors: "); DRW_DBG(numCol);
-        for (dint32 i = 0 ; i < numCol; ++i){
+        for (dint32 i = 0 ; (i < numCol) && buf->isGood(); ++i){
             double unkDouble = buf->getBitDouble();
             DRW_DBG("\nunkDouble: "); DRW_DBG(unkDouble);
             duint16 unkShort = buf->getBitShort();
@@ -1865,12 +2122,12 @@ bool DRW_Hatch::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     loopsnum = buf->getBitLong();
 
     //read loops
-    for (dint32 i = 0 ; i < loopsnum; ++i){
+    for (dint32 i = 0 ; (i < loopsnum) && buf->isGood(); ++i){
         loop = new DRW_HatchLoop(buf->getBitLong());
         havePixelSize |= loop->type & 4;
         if (!(loop->type & 2)){ //Not polyline
             dint32 numPathSeg = buf->getBitLong();
-            for (dint32 j = 0; j<numPathSeg;++j){
+            for (dint32 j = 0; (j<numPathSeg) && buf->isGood();++j){
                 duint8 typePath = buf->getRawChar8();
                 if (typePath == 1){ //line
                     addLine();
@@ -1907,27 +2164,32 @@ bool DRW_Hatch::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
                     spline->ncontrol = buf->getBitLong();
                     spline->knotslist.reserve(spline->nknots);
                     spline->controllist.reserve(spline->ncontrol);
-                    for (dint32 j = 0; j < spline->nknots;++j){
+                    for (dint32 j = 0; (j < spline->nknots) && buf->isGood();++j){
                         spline->knotslist.push_back (buf->getBitDouble());
                     }
-                    for (dint32 j = 0; j < spline->ncontrol;++j){
+                    for (dint32 j = 0; (j < spline->ncontrol) && buf->isGood();++j){
                         // pt0 2RD 10 control point
                         DRW_Coord* crd = new DRW_Coord(buf->get2RawDouble());
-                        spline->controllist.push_back(crd);
                         if(isRational)
                             crd->z =  buf->getBitDouble(); //RLZ: investigate how store weight
+                        /* patch dxfrw_c: acelasi punct era adaugat de doua ori in lista (geometrie dublata
+                           si eliberare dubla la stergerea hasurii) */
                         spline->controllist.push_back(crd);
                     }
                     if (version > DRW::AC1021) { //2010+
                         spline->nfit = buf->getBitLong();
                         spline->fitlist.reserve(spline->nfit);
-                        for (dint32 j = 0; j < spline->nfit;++j){
+                        for (dint32 j = 0; (j < spline->nfit) && buf->isGood();++j){
                             // Fitpoint 2RD 11
                             DRW_Coord* crd = new DRW_Coord(buf->get2RawDouble());
                             spline->fitlist.push_back (crd);
                         }
-                        spline->tgStart = buf->get2RawDouble();
-                        spline->tgEnd = buf->get2RawDouble();
+                        /* patch dxfrw_c: tangentele de capat (12, 13) exista in DWG doar daca muchia are
+                           puncte de potrivire; citite neconditionat, decalau restul hasurii (hasura nedecodata) */
+                        if (spline->nfit > 0) {
+                            spline->tgStart = buf->get2RawDouble();
+                            spline->tgEnd = buf->get2RawDouble();
+                        }
                     }
                 }
             }
@@ -1936,7 +2198,7 @@ bool DRW_Hatch::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
             bool asBulge = buf->getBit();
             pline->flags = buf->getBit();//closed bit
             dint32 numVert = buf->getBitLong();
-            for (dint32 j = 0; j<numVert;++j){
+            for (dint32 j = 0; (j<numVert) && buf->isGood();++j){
                 DRW_Vertex2D v;
                 v.x = buf->getRawDouble();
                 v.y = buf->getRawDouble();
@@ -1956,25 +2218,26 @@ bool DRW_Hatch::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     hpattern = buf->getBitShort();
     DRW_DBG("\nhatch style: "); DRW_DBG(hstyle); DRW_DBG(" pattern type"); DRW_DBG(hpattern);
     if (!solid){
-        angle = buf->getBitDouble();
+        /* patch dxfrw_c: in DWG unghiurile sunt in radiani, in DXF (codurile 52 si 53) in grade */
+        angle = buf->getBitDouble() * ARAD;
         scale = buf->getBitDouble();
         doubleflag = buf->getBit();
         deflines = buf->getBitShort();
-        for (dint32 i = 0 ; i < deflines; ++i){
-            DRW_Coord ptL, offL;
-            double angleL = buf->getBitDouble();
-            ptL.x = buf->getBitDouble();
-            ptL.y = buf->getBitDouble();
-            offL.x = buf->getBitDouble();
-            offL.y = buf->getBitDouble();
+        patternLines.clear();
+        for (dint32 i = 0 ; (i < deflines) && buf->isGood(); ++i){
+            /* patch dxfrw_c: valorile modelului erau citite si aruncate; acum se pastreaza */
+            DRW_HatchPatternLine pl;
+            pl.angle = buf->getBitDouble() * ARAD;   /* radiani -> grade */
+            pl.base.x = buf->getBitDouble();
+            pl.base.y = buf->getBitDouble();
+            pl.offset.x = buf->getBitDouble();
+            pl.offset.y = buf->getBitDouble();
             duint16 numDashL = buf->getBitShort();
-            DRW_DBG("\ndef line: "); DRW_DBG(angleL); DRW_DBG(","); DRW_DBG(ptL.x); DRW_DBG(","); DRW_DBG(ptL.y);
-            DRW_DBG(","); DRW_DBG(offL.x); DRW_DBG(","); DRW_DBG(offL.y); DRW_DBG(","); DRW_DBG(angleL);
-            for (duint16 i = 0 ; i < numDashL; ++i){
-                double lenghtL = buf->getBitDouble();
-                DRW_DBG(","); DRW_DBG(lenghtL);
-            }
+            for (duint16 j = 0 ; (j < numDashL) && buf->isGood(); ++j)
+                pl.dashes.push_back(buf->getBitDouble());
+            patternLines.push_back(pl);
         }//end deflines
+        deflines = static_cast<int>(patternLines.size());
     } //end not solid
 
     if (havePixelSize){
@@ -1985,7 +2248,7 @@ bool DRW_Hatch::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     DRW_DBG("\nnum Seed Points  "); DRW_DBG(numSeedPoints);
     //read Seed Points
     DRW_Coord seedPt;
-    for (dint32 i = 0 ; i < numSeedPoints; ++i){
+    for (dint32 i = 0 ; (i < numSeedPoints) && buf->isGood(); ++i){
         seedPt.x = buf->getRawDouble();
         seedPt.y = buf->getRawDouble();
         DRW_DBG("\n  "); DRW_DBG(seedPt.x); DRW_DBG(","); DRW_DBG(seedPt.y);
@@ -1997,7 +2260,7 @@ bool DRW_Hatch::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
         return ret;
     DRW_DBG("Remaining bytes: "); DRW_DBG(buf->numRemainingBytes()); DRW_DBG("\n");
 
-    for (duint32 i = 0 ; i < totalBoundItems; ++i){
+    for (duint32 i = 0 ; (i < totalBoundItems) && buf->isGood(); ++i){
         dwgHandle biH = buf->getHandle();
         DRW_DBG("Boundary Items Handle: "); DRW_DBGHL(biH.code, biH.size, biH.ref);
     }
@@ -2146,11 +2409,11 @@ bool DRW_Spline::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     }
 
     knotslist.reserve(nknots);
-    for (dint32 i= 0; i<nknots; ++i){
+    for (dint32 i= 0; (i<nknots) && buf->isGood(); ++i){
         knotslist.push_back (buf->getBitDouble());
     }
     controllist.reserve(ncontrol);
-    for (dint32 i= 0; i<ncontrol; ++i){
+    for (dint32 i= 0; (i<ncontrol) && buf->isGood(); ++i){
         DRW_Coord* crd = new DRW_Coord(buf->get3BitDouble());
         controllist.push_back(crd);
         if (weight){
@@ -2158,7 +2421,7 @@ bool DRW_Spline::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
         }
     }
     fitlist.reserve(nfit);
-    for (dint32 i= 0; i<nfit; ++i){
+    for (dint32 i= 0; (i<nfit) && buf->isGood(); ++i){
         DRW_Coord* crd = new DRW_Coord(buf->get3BitDouble());
         fitlist.push_back (crd);
     }
@@ -2261,7 +2524,7 @@ bool DRW_Image::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
         buf->get2RawDouble();
     } else { //clipType == 2
         dint32 numVerts = buf->getBitLong();
-        for (int i= 0; i< numVerts;++i)
+        for (int i= 0; (i< numVerts) && buf->isGood();++i)
             buf->get2RawDouble();
     }
 
@@ -2409,7 +2672,8 @@ bool DRW_Dimension::parseDwg(DRW::Version version, dwgBuffer *buf, dwgBuffer *sB
     type =  (type & 2) ? type | 0x20 : type & 0xDF; //set bit 5
     DRW_DBG(" type (70) set: "); DRW_DBG(type);
     //clear last 3 bits to set integer dim type
-    type &= 0xF8;
+    /* patch dxfrw_c: se sterge si bitul 8, inexistent in DXF (cod 70): tipul cotei nu era recunoscut */
+    type &= 0xF0;
     text = sBuf->getVariableText(version, false);
     DRW_DBG("\nforced dim text: "); DRW_DBG(text.c_str());
     rot = buf->getBitDouble();
@@ -2799,7 +3063,7 @@ bool DRW_Leader::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     DRW_DBG(" Num pts "); DRW_DBG(nPt);
 
     // add vertexs
-    for (int i = 0; i< nPt; i++){
+    for (int i = 0; (i< nPt) && buf->isGood(); i++){
         DRW_Coord* vertex = new DRW_Coord(buf->get3BitDouble());
         vertexlist.push_back(vertex);
         DRW_DBG("\nvertex "); DRW_DBGPT(vertex->x, vertex->y, vertex->z);
@@ -2861,6 +3125,533 @@ bool DRW_Leader::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
     return buf->isGood();
 }
 
+/* ======================================================================== MULTILEADER (patch dxfrw_c) */
+
+DRW_MLeader::DRW_MLeader() {
+    eType = DRW::MLEADER;
+    classVersion = 2;
+    ctxScale = 1.0;
+    ctxTextHeight = 0.18;
+    ctxArrowSize = 0.18;
+    landingGap = 0.09;
+    ctxTextLeft = ctxTextRight = 1;
+    ctxTextAngleType = 1;
+    ctxTextAlignType = 0;
+    hasText = false;
+    textNormal = DRW_Coord(0.0, 0.0, 1.0);
+    textDirection = DRW_Coord(1.0, 0.0, 0.0);
+    textRotation = 0.0;
+    textWidth = textDefinedHeight = 0.0;
+    lineSpacingFactor = 1.0;
+    lineSpacingStyle = 1;
+    textColor = DRW_MLeaderLine::ByBlockRaw;
+    textAttachment = 1;
+    flowDirection = 1;
+    bgColor = static_cast<dint32>(0xC8000000);
+    bgScale = 1.5;
+    bgTransparency = 0;
+    bgFill = bgMaskFill = false;
+    columnType = 0;
+    textHeightAuto = false;
+    columnWidth = columnGutter = 0.0;
+    columnFlowReversed = false;
+    wordBreak = true;
+    hasBlock = false;
+    blockNormal = DRW_Coord(0.0, 0.0, 1.0);
+    blockScale = DRW_Coord(1.0, 1.0, 1.0);
+    blockRotation = 0.0;
+    blockColor = DRW_MLeaderLine::ByBlockRaw;
+    for (int i = 0; i < 16; ++i)
+        blockTransform[i] = (i % 5 == 0) ? 1.0 : 0.0;
+    planeXDir = DRW_Coord(1.0, 0.0, 0.0);
+    planeYDir = DRW_Coord(0.0, 1.0, 0.0);
+    normalReversed = false;
+    ctxTextTop = ctxTextBottom = 9;
+    overrideFlags = 0;
+    leaderType = 1;
+    lineColor = DRW_MLeaderLine::ByBlockRaw;
+    leaderLineWeight = -2;
+    landingEnabled = doglegEnabled = true;
+    landingDistance = 0.36;
+    arrowSize = 0.18;
+    contentType = 2;
+    textLeftAttach = textRightAttach = 1;
+    textAngleType = 1;
+    textAlignType = 0;
+    entTextColor = DRW_MLeaderLine::ByBlockRaw;
+    textFrame = false;
+    entBlockColor = DRW_MLeaderLine::ByBlockRaw;
+    entBlockScale = DRW_Coord(1.0, 1.0, 1.0);
+    entBlockRotation = 0.0;
+    blockConnection = 0;
+    annotative = false;
+    textDirNegative = false;
+    ipeAlign = 0;
+    justification = 1;
+    scale = 1.0;
+    textAttachDir = 0;
+    textBottomAttach = textTopAttach = 9;
+    extendToText = false;
+    styleH = ctxTextStyleH = ctxBlockH = lineTypeH = arrowH = entTextStyleH = entBlockH = 0;
+    section = 0;
+    transformIndex = 0;
+    afterSubclass = false;
+    lastPointCode = 0;
+}
+
+/* Citirea DXF: codurile au sens diferit in functie de sectiune (entitate, CONTEXT_DATA{, LEADER{,
+   LEADER_LINE{), deci se urmareste sectiunea curenta. Punctele vin ca x (cod), y (cod+10), z (cod+20). */
+void DRW_MLeader::parseCode(int code, dxfReader *reader){
+    /* punctele: codul de baza si axa */
+    int base = 0, axis = -1;
+    if (code >= 10 && code <= 16) { base = code; axis = 0; }
+    else if (code >= 20 && code <= 26) { base = code - 10; axis = 1; }
+    else if (code >= 30 && code <= 36) { base = code - 20; axis = 2; }
+    else if (code >= 110 && code <= 112) { base = code; axis = 0; }
+    else if (code >= 120 && code <= 122) { base = code - 10; axis = 1; }
+    else if (code >= 130 && code <= 132) { base = code - 20; axis = 2; }
+    if (axis >= 0 && section > 0) {
+        DRW_Coord *p = NULL;
+        std::vector<DRW_Coord> *vec = NULL;
+        if (section == 1) {
+            switch (base) {
+            case 10: p = &contentBase; break;
+            case 11: p = &textNormal; break;
+            case 12: p = &textLocation; break;
+            case 13: p = &textDirection; break;
+            case 14: p = &blockNormal; break;
+            case 15: p = &blockLocation; break;
+            case 16: p = &blockScale; break;
+            case 110: p = &planeOrigin; break;
+            case 111: p = &planeXDir; break;
+            case 112: p = &planeYDir; break;
+            default: break;
+            }
+        } else if (section == 2 && !leaders.empty()) {
+            DRW_MLeaderRoot &r = leaders.back();
+            switch (base) {
+            case 10: p = &r.lastPoint; break;
+            case 11: p = &r.doglegVector; break;
+            case 12: vec = &r.breakStart; break;
+            case 13: vec = &r.breakEnd; break;
+            default: break;
+            }
+        } else if (section == 3 && !leaders.empty() && !leaders.back().lines.empty()) {
+            DRW_MLeaderLine &l = leaders.back().lines.back();
+            switch (base) {
+            case 10: vec = &l.vertices; break;
+            case 11: vec = &l.breakStart; break;
+            case 12: vec = &l.breakEnd; break;
+            default: break;
+            }
+        }
+        if (vec) {
+            if (axis == 0) vec->push_back(DRW_Coord());
+            if (!vec->empty()) p = &vec->back();
+        }
+        if (p) {
+            double v = reader->getDouble();
+            if (axis == 0) p->x = v; else if (axis == 1) p->y = v; else p->z = v;
+            return;
+        }
+    }
+
+    switch (section) {
+    case 1: /* CONTEXT_DATA */
+        switch (code) {
+        case 40: ctxScale = reader->getDouble(); break;
+        case 41: ctxTextHeight = reader->getDouble(); break;
+        case 140: ctxArrowSize = reader->getDouble(); break;
+        case 145: landingGap = reader->getDouble(); break;
+        case 174: ctxTextLeft = reader->getInt32(); break;
+        case 175: ctxTextRight = reader->getInt32(); break;
+        case 176: ctxTextAngleType = reader->getInt32(); break;
+        case 177: ctxTextAlignType = reader->getInt32(); break;
+        case 290: hasText = reader->getInt32() != 0; break;
+        case 304: text = reader->getUtf8String(); break;
+        case 340: ctxTextStyleH = reader->getHandleString(); break;
+        case 42: textRotation = reader->getDouble(); break;
+        case 43: textWidth = reader->getDouble(); break;
+        case 44: textDefinedHeight = reader->getDouble(); break;
+        case 45: lineSpacingFactor = reader->getDouble(); break;
+        case 170: lineSpacingStyle = reader->getInt32(); break;
+        case 90: textColor = reader->getInt32(); break;
+        case 171: textAttachment = reader->getInt32(); break;
+        case 172: flowDirection = reader->getInt32(); break;
+        case 91: bgColor = reader->getInt32(); break;
+        case 141: bgScale = reader->getDouble(); break;
+        case 92: bgTransparency = reader->getInt32(); break;
+        case 291: bgFill = reader->getInt32() != 0; break;
+        case 292: bgMaskFill = reader->getInt32() != 0; break;
+        case 173: columnType = reader->getInt32(); break;
+        case 293: textHeightAuto = reader->getInt32() != 0; break;
+        case 142: columnWidth = reader->getDouble(); break;
+        case 143: columnGutter = reader->getDouble(); break;
+        case 294: columnFlowReversed = reader->getInt32() != 0; break;
+        case 144: columnSizes.push_back(reader->getDouble()); break;
+        case 295: wordBreak = reader->getInt32() != 0; break;
+        case 296: hasBlock = reader->getInt32() != 0; break;
+        case 341: ctxBlockH = reader->getHandleString(); break;
+        case 46: blockRotation = reader->getDouble(); break;
+        case 93: blockColor = reader->getInt32(); break;
+        case 47:
+            if (transformIndex < 16) blockTransform[transformIndex++] = reader->getDouble();
+            break;
+        case 297: normalReversed = reader->getInt32() != 0; break;
+        case 272: ctxTextBottom = reader->getInt32(); break;
+        case 273: ctxTextTop = reader->getInt32(); break;
+        case 302:
+            leaders.push_back(DRW_MLeaderRoot());
+            section = 2;
+            break;
+        case 301: section = 0; break;
+        default: break;
+        }
+        return;
+    case 2: /* LEADER */
+        if (leaders.empty()) return;
+        switch (code) {
+        case 290: leaders.back().hasLastPoint = reader->getInt32() != 0; break;
+        case 291: leaders.back().hasDogleg = reader->getInt32() != 0; break;
+        case 90: leaders.back().branchIndex = reader->getInt32(); break;
+        case 40: leaders.back().doglegLength = reader->getDouble(); break;
+        case 271: leaders.back().attachDir = reader->getInt32(); break;
+        case 304:
+            leaders.back().lines.push_back(DRW_MLeaderLine());
+            section = 3;
+            break;
+        case 303: section = 1; break;
+        default: break;
+        }
+        return;
+    case 3: /* LEADER_LINE */
+        if (leaders.empty() || leaders.back().lines.empty()) return;
+        {
+            DRW_MLeaderLine &l = leaders.back().lines.back();
+            switch (code) {
+            case 90: l.breakIndex = reader->getInt32(); break;
+            case 91: l.lineIndex = reader->getInt32(); break;
+            case 170: l.lineType = reader->getInt32(); l.haveOverrides = true; break;
+            case 92: l.color = reader->getInt32(); break;
+            case 340: l.lineTypeH = reader->getHandleString(); break;
+            case 171: l.lineWeight = reader->getInt32(); l.haveOverrides = true; break;
+            case 40: l.arrowSize = reader->getDouble(); l.haveOverrides = true; break;
+            case 341: l.arrowH = reader->getHandleString(); break;
+            case 93: l.flags = reader->getInt32(); l.haveOverrides = true; break;
+            case 305: section = 2; break;
+            default: break;
+            }
+        }
+        return;
+    default:
+        break;
+    }
+
+    /* nivelul entitatii; dupa "100 AcDbMLeader", 330 este un ATTDEF al blocului (nu proprietarul) */
+    switch (code) {
+    case 100:
+        if (reader->getString() == "AcDbMLeader") afterSubclass = true;
+        break;
+    case 270: classVersion = reader->getInt32(); break;
+    case 300: section = 1; break;
+    case 340: styleH = reader->getHandleString(); break;
+    case 90: overrideFlags = static_cast<duint32>(reader->getInt32()); break;
+    case 170: leaderType = reader->getInt32(); break;
+    case 91: lineColor = reader->getInt32(); break;
+    case 341: lineTypeH = reader->getHandleString(); break;
+    case 171: leaderLineWeight = reader->getInt32(); break;
+    case 290: landingEnabled = reader->getInt32() != 0; break;
+    case 291: doglegEnabled = reader->getInt32() != 0; break;
+    case 41: landingDistance = reader->getDouble(); break;
+    case 342: arrowH = reader->getHandleString(); break;
+    case 42: arrowSize = reader->getDouble(); break;
+    case 172: contentType = reader->getInt32(); break;
+    case 343: entTextStyleH = reader->getHandleString(); break;
+    case 173: textLeftAttach = reader->getInt32(); break;
+    case 95: textRightAttach = reader->getInt32(); break;
+    case 174: textAngleType = reader->getInt32(); break;
+    case 175: textAlignType = reader->getInt32(); break;
+    case 92: entTextColor = reader->getInt32(); break;
+    case 292: textFrame = reader->getInt32() != 0; break;
+    case 344: entBlockH = reader->getHandleString(); break;
+    case 93: entBlockColor = reader->getInt32(); break;
+    case 10: entBlockScale.x = reader->getDouble(); break;
+    case 20: entBlockScale.y = reader->getDouble(); break;
+    case 30: entBlockScale.z = reader->getDouble(); break;
+    case 43: entBlockRotation = reader->getDouble(); break;
+    case 176: blockConnection = reader->getInt32(); break;
+    case 293: annotative = reader->getInt32() != 0; break;
+    case 302:
+        if (blockAttribs.empty()) blockAttribs.push_back(DRW_MLeaderBlockAttr());
+        blockAttribs.back().text = reader->getUtf8String();
+        break;
+    case 177:
+        if (!blockAttribs.empty()) blockAttribs.back().index = reader->getInt32();
+        break;
+    case 44:
+        if (!blockAttribs.empty()) blockAttribs.back().width = reader->getDouble();
+        break;
+    case 294: textDirNegative = reader->getInt32() != 0; break;
+    case 178: ipeAlign = reader->getInt32(); break;
+    case 179: justification = reader->getInt32(); break;
+    case 45: scale = reader->getDouble(); break;
+    case 271: textAttachDir = reader->getInt32(); break;
+    case 272: textBottomAttach = reader->getInt32(); break;
+    case 273: textTopAttach = reader->getInt32(); break;
+    case 295: extendToText = reader->getInt32() != 0; break;
+    case 94: case 345:
+        break;  /* sagetile pe brate (din R2010 sunt pe fiecare linie): nepastrate */
+    case 330:
+        if (!afterSubclass)
+            DRW_Entity::parseCode(code, reader);
+        else {  /* un atribut al blocului de continut incepe cu handle-ul ATTDEF-ului */
+            blockAttribs.push_back(DRW_MLeaderBlockAttr());
+            blockAttribs.back().attdefH = reader->getHandleString();
+        }
+        break;
+    default:
+        DRW_Entity::parseCode(code, reader);
+        break;
+    }
+}
+
+/* culoare CMC din DWG (R2004+): indice BS, valoare RGB BL (forma "bruta" din DXF), octet de flag-uri
+   si, optional, numele culorii si al cartii (in fluxul de siruri din R2007) */
+static dint32 drwReadCmcRaw(DRW::Version version, dwgBuffer *buf, dwgBuffer *sBuf) {
+    if (version < DRW::AC1018) {
+        dint16 idx = buf->getSBitShort();
+        if (idx == 256) return static_cast<dint32>(0xC0000000);
+        if (idx == 0) return static_cast<dint32>(0xC1000000);
+        return static_cast<dint32>(0xC3000000u | (static_cast<duint32>(idx) & 0xFF));
+    }
+    buf->getBitShort();
+    dint32 rgb = static_cast<dint32>(buf->getBitLong());
+    duint8 cb = buf->getRawChar8();
+    if (cb & 1) sBuf->getVariableText(version, false);
+    if (cb & 2) sBuf->getVariableText(version, false);
+    return rgb;
+}
+
+/* Citirea DWG (MULTILEADER exista din R2007; fisierele lotului sunt R2018). Ordinea campurilor este cea
+   din specificatia ODA: versiunea (R2010+), datele de context (bratele cu liniile lor, apoi textul
+   sau blocul de continut, planul), apoi proprietatile entitatii. Handle-urile sunt in fluxul de
+   handle-uri, dupa cele comune, in ordinea in care apar campurile; sirurile, in fluxul de siruri. */
+bool DRW_MLeader::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
+    dwgBuffer sBuff = *buf;
+    dwgBuffer *sBuf = buf;
+    if (version > DRW::AC1018) {//2007+
+        sBuf = &sBuff; //separate buffer for strings
+    }
+    bool ret = DRW_Entity::parseDwg(version, buf, sBuf, bs);
+    if (!ret)
+        return ret;
+    DRW_DBG("\n***************************** parsing multileader ***************************************\n");
+    duint64 strStartBits = sBuf->getPosition() * 8 + sBuf->getBitPos();
+    if (version > DRW::AC1021) //2010+
+        classVersion = buf->getBitShort();
+
+    /* bratele */
+    dint32 numRoots = buf->getBitLong();
+    if (numRoots < 0 || numRoots > 10000) return false;
+    leaders.clear();
+    for (dint32 i = 0; i < numRoots && buf->isGood(); ++i) {
+        DRW_MLeaderRoot r;
+        r.hasLastPoint = buf->getBit() != 0;
+        r.hasDogleg = buf->getBit() != 0;
+        r.lastPoint = buf->get3BitDouble();
+        r.doglegVector = buf->get3BitDouble();
+        dint32 nb = buf->getBitLong();
+        if (nb < 0 || nb > 10000) return false;
+        for (dint32 k = 0; k < nb && buf->isGood(); ++k) {
+            r.breakStart.push_back(buf->get3BitDouble());
+            r.breakEnd.push_back(buf->get3BitDouble());
+        }
+        r.branchIndex = buf->getBitLong();
+        r.doglegLength = buf->getBitDouble();
+        dint32 nl = buf->getBitLong();
+        if (nl < 0 || nl > 10000) return false;
+        for (dint32 j = 0; j < nl && buf->isGood(); ++j) {
+            DRW_MLeaderLine l;
+            dint32 np = buf->getBitLong();
+            if (np < 0 || np > 100000) return false;
+            for (dint32 k = 0; k < np && buf->isGood(); ++k)
+                l.vertices.push_back(buf->get3BitDouble());
+            dint32 nbr = buf->getBitLong();
+            if (nbr < 0 || nbr > 10000) return false;
+            if (nbr > 0) {
+                l.breakIndex = buf->getBitLong();
+                for (dint32 k = 0; k < nbr && buf->isGood(); ++k) {
+                    l.breakStart.push_back(buf->get3BitDouble());
+                    l.breakEnd.push_back(buf->get3BitDouble());
+                }
+            }
+            l.lineIndex = buf->getBitLong();
+            if (version > DRW::AC1021) {//2010+
+                l.haveOverrides = true;
+                l.lineType = buf->getBitShort();
+                l.color = drwReadCmcRaw(version, buf, sBuf);
+                l.lineWeight = buf->getBitLong();
+                l.arrowSize = buf->getBitDouble();
+                l.flags = buf->getBitLong();
+            }
+            r.lines.push_back(l);
+        }
+        if (version > DRW::AC1021) //2010+
+            r.attachDir = buf->getBitShort();
+        leaders.push_back(r);
+    }
+    /* restul contextului */
+    ctxScale = buf->getBitDouble();
+    contentBase = buf->get3BitDouble();
+    ctxTextHeight = buf->getBitDouble();
+    ctxArrowSize = buf->getBitDouble();
+    landingGap = buf->getBitDouble();
+    ctxTextLeft = buf->getBitShort();
+    ctxTextRight = buf->getBitShort();
+    ctxTextAngleType = buf->getBitShort();
+    ctxTextAlignType = buf->getBitShort();
+    hasText = buf->getBit() != 0;
+    if (hasText) {
+        text = sBuf->getVariableText(version, false);
+        textNormal = buf->get3BitDouble();
+        textLocation = buf->get3BitDouble();
+        textDirection = buf->get3BitDouble();
+        textRotation = buf->getBitDouble();
+        textWidth = buf->getBitDouble();
+        textDefinedHeight = buf->getBitDouble();
+        lineSpacingFactor = buf->getBitDouble();
+        lineSpacingStyle = buf->getBitShort();
+        textColor = drwReadCmcRaw(version, buf, sBuf);
+        textAttachment = buf->getBitShort();
+        flowDirection = buf->getBitShort();
+        bgColor = drwReadCmcRaw(version, buf, sBuf);
+        bgScale = buf->getBitDouble();
+        bgTransparency = buf->getBitLong();
+        bgFill = buf->getBit() != 0;
+        bgMaskFill = buf->getBit() != 0;
+        columnType = buf->getBitShort();
+        textHeightAuto = buf->getBit() != 0;
+        columnWidth = buf->getBitDouble();
+        columnGutter = buf->getBitDouble();
+        columnFlowReversed = buf->getBit() != 0;
+        dint32 nc = buf->getBitLong();
+        if (nc < 0 || nc > 10000) return false;
+        for (dint32 k = 0; k < nc && buf->isGood(); ++k)
+            columnSizes.push_back(buf->getBitDouble());
+        wordBreak = buf->getBit() != 0;
+        buf->getBit(); /* necunoscut */
+    } else {
+        hasBlock = buf->getBit() != 0;
+        if (hasBlock) {
+            blockNormal = buf->get3BitDouble();
+            blockLocation = buf->get3BitDouble();
+            blockScale = buf->get3BitDouble();
+            blockRotation = buf->getBitDouble();
+            blockColor = drwReadCmcRaw(version, buf, sBuf);
+            for (int k = 0; k < 16; ++k)
+                blockTransform[k] = buf->getBitDouble();
+        }
+    }
+    planeOrigin = buf->get3BitDouble();
+    planeXDir = buf->get3BitDouble();
+    planeYDir = buf->get3BitDouble();
+    normalReversed = buf->getBit() != 0;
+    if (version > DRW::AC1021) {//2010+
+        ctxTextTop = buf->getBitShort();
+        ctxTextBottom = buf->getBitShort();
+    }
+    /* proprietatile entitatii */
+    overrideFlags = buf->getBitLong();
+    leaderType = buf->getBitShort();
+    lineColor = drwReadCmcRaw(version, buf, sBuf);
+    leaderLineWeight = buf->getBitLong();
+    landingEnabled = buf->getBit() != 0;
+    doglegEnabled = buf->getBit() != 0;
+    landingDistance = buf->getBitDouble();
+    arrowSize = buf->getBitDouble();
+    contentType = buf->getBitShort();
+    textLeftAttach = buf->getBitShort();
+    textRightAttach = buf->getBitShort();
+    textAngleType = buf->getBitShort();
+    textAlignType = buf->getBitShort();
+    entTextColor = drwReadCmcRaw(version, buf, sBuf);
+    textFrame = buf->getBit() != 0;
+    entBlockColor = drwReadCmcRaw(version, buf, sBuf);
+    entBlockScale = buf->get3BitDouble();
+    entBlockRotation = buf->getBitDouble();
+    blockConnection = buf->getBitShort();
+    annotative = buf->getBit() != 0;
+    /* pana la R2007 urmeaza lista sagetilor si lista etichetelor de bloc; din R2010 doar a doua
+       (verificat pe fisiere R2018: datele se termina exact la inceputul fluxului de siruri) */
+    dint32 numArrows = 0;
+    if (version < DRW::AC1024) {
+        numArrows = buf->getBitLong();
+        if (numArrows < 0 || numArrows > 10000) return false;
+        for (dint32 k = 0; k < numArrows && buf->isGood(); ++k)
+            buf->getBit(); /* este implicita */
+    }
+    dint32 numLabels = buf->getBitLong();
+    if (numLabels < 0 || numLabels > 10000) return false;
+    blockAttribs.clear();
+    for (dint32 k = 0; k < numLabels && buf->isGood(); ++k) {
+        DRW_MLeaderBlockAttr a;
+        a.text = sBuf->getVariableText(version, false);
+        a.index = buf->getBitShort();
+        a.width = buf->getBitDouble();
+        blockAttribs.push_back(a);
+    }
+    textDirNegative = buf->getBit() != 0;
+    ipeAlign = buf->getBitShort();
+    justification = buf->getBitShort();
+    scale = buf->getBitDouble();
+    if (version > DRW::AC1021) {//2010+
+        textAttachDir = buf->getBitShort();
+        textBottomAttach = buf->getBitShort();
+        textTopAttach = buf->getBitShort();
+    }
+    if (version > DRW::AC1024) //2013+
+        extendToText = buf->getBit() != 0;
+    if (!buf->isGood())
+        return false;
+    /* din R2007 datele se termina exact unde incepe fluxul de siruri; altfel structura nu a fost
+       recunoscuta, iar valorile citite nu sunt de incredere */
+    if (version > DRW::AC1018 && sBuf != buf) {
+        duint64 dataEnd = buf->getPosition() * 8 + buf->getBitPos();
+        /* fara siruri, ultimul bit al datelor este indicatorul lor (la objSize - 1) */
+        duint64 limit = (strStartBits >= objSize) ? objSize - 1 : strStartBits;
+        if (dataEnd != limit)
+            return false;
+    }
+
+    /* handle-urile, in aceeasi ordine */
+    ret = DRW_Entity::parseDwgEntHandle(version, buf);
+    if (!ret)
+        return ret;
+    for (size_t i = 0; i < leaders.size(); ++i) {
+        for (size_t j = 0; j < leaders[i].lines.size(); ++j) {
+            if (version > DRW::AC1021) {//2010+
+                leaders[i].lines[j].lineTypeH = buf->getOffsetHandle(handle).ref;
+                leaders[i].lines[j].arrowH = buf->getOffsetHandle(handle).ref;
+            }
+        }
+    }
+    if (hasText)
+        ctxTextStyleH = buf->getOffsetHandle(handle).ref;
+    else if (hasBlock)
+        ctxBlockH = buf->getOffsetHandle(handle).ref;
+    styleH = buf->getOffsetHandle(handle).ref;
+    lineTypeH = buf->getOffsetHandle(handle).ref;
+    arrowH = buf->getOffsetHandle(handle).ref;
+    entTextStyleH = buf->getOffsetHandle(handle).ref;
+    entBlockH = buf->getOffsetHandle(handle).ref;
+    for (dint32 k = 0; k < numArrows && buf->isGood(); ++k)
+        buf->getOffsetHandle(handle);
+    for (size_t k = 0; k < blockAttribs.size() && buf->isGood(); ++k)
+        blockAttribs[k].attdefH = buf->getOffsetHandle(handle).ref;
+    DRW_DBG("Remaining bytes: "); DRW_DBG(buf->numRemainingBytes()); DRW_DBG("\n");
+    return buf->isGood();
+}
+
 void DRW_Viewport::parseCode(int code, dxfReader *reader){
     switch (code) {
     case 40:
@@ -2881,6 +3672,23 @@ void DRW_Viewport::parseCode(int code, dxfReader *reader){
     case 22:
         centerPY = reader->getDouble();
         break;
+    /* patch dxfrw_c: directia, tinta, inaltimea si unghiurile vederii erau citite doar din DWG */
+    case 13: snapPX = reader->getDouble(); break;
+    case 23: snapPY = reader->getDouble(); break;
+    case 14: snapSpPX = reader->getDouble(); break;
+    case 24: snapSpPY = reader->getDouble(); break;
+    case 16: viewDir.x = reader->getDouble(); break;
+    case 26: viewDir.y = reader->getDouble(); break;
+    case 36: viewDir.z = reader->getDouble(); break;
+    case 17: viewTarget.x = reader->getDouble(); break;
+    case 27: viewTarget.y = reader->getDouble(); break;
+    case 37: viewTarget.z = reader->getDouble(); break;
+    case 42: viewLength = reader->getDouble(); break;
+    case 43: frontClip = reader->getDouble(); break;
+    case 44: backClip = reader->getDouble(); break;
+    case 45: viewHeight = reader->getDouble(); break;
+    case 50: snapAngle = reader->getDouble(); break;
+    case 51: twistAngle = reader->getDouble(); break;
     default:
         DRW_Point::parseCode(code, reader);
         break;
@@ -2914,7 +3722,7 @@ bool DRW_Viewport::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
         viewDir.y = buf->getBitDouble();
         viewDir.z = buf->getBitDouble();
         DRW_DBG("\nview direction "); DRW_DBGPT(viewDir.x, viewDir.y, viewDir.z);
-        twistAngle = buf->getBitDouble();
+        twistAngle = buf->getBitDouble() * ARAD; /* patch dxfrw_c: in DWG in radiani, in DXF (cod 51) in grade */
         DRW_DBG("\nView twist Angle: "); DRW_DBG(twistAngle);
         viewHeight = buf->getBitDouble();
         DRW_DBG("\nview Height: "); DRW_DBG(viewHeight);
@@ -2924,7 +3732,7 @@ bool DRW_Viewport::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
         DRW_DBG("\nfront Clip Z: "); DRW_DBG(frontClip);
         backClip = buf->getBitDouble();
         DRW_DBG(" back Clip Z: "); DRW_DBG(backClip);
-        snapAngle = buf->getBitDouble();
+        snapAngle = buf->getBitDouble() * ARAD; /* patch dxfrw_c: in DWG in radiani, in DXF (cod 50) in grade */
         DRW_DBG("\n snap Angle: "); DRW_DBG(snapAngle);
         centerPX = buf->getRawDouble();
         centerPY = buf->getRawDouble();
@@ -2977,7 +3785,7 @@ bool DRW_Viewport::parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs){
         DRW_DBG("ViewPort ent header: "); DRW_DBGHL(someHdl.code, someHdl.size, someHdl.ref); DRW_DBG("\n");
     }
     if (version > DRW::AC1014) {//2000+
-        for (duint8 i=0; i < frozenLyCount; ++i){
+        for (duint8 i=0; (i < frozenLyCount) && buf->isGood(); ++i){
             someHdl = buf->getHandle();
             DRW_DBG("Frozen layer handle "); DRW_DBG(i); DRW_DBG(": "); DRW_DBGHL(someHdl.code, someHdl.size, someHdl.ref); DRW_DBG("\n");
         }

@@ -55,10 +55,11 @@ public:
  * */
 class dwgPageInfo {
 public:
-    dwgPageInfo(){}
-    dwgPageInfo(duint64 i, duint64 ad, duint32 sz){
-        Id=i; address=ad; size=sz;
-    }
+    /* patch dxfrw_c: campurile erau neinitializate; o pagina inexistenta in harta era creata cu
+       valori aleatorii (rezultate nedeterministe si corupere de memorie) */
+    dwgPageInfo() : Id(0), address(0), size(0), dataSize(0), startOffset(0), cSize(0), uSize(0) {}
+    dwgPageInfo(duint64 i, duint64 ad, duint32 sz)
+        : Id(i), address(ad), size(sz), dataSize(0), startOffset(0), cSize(0), uSize(0) {}
     ~dwgPageInfo(){}
     duint64 Id;
     duint64 address; //in file stream, for rd18, rd21
@@ -87,6 +88,9 @@ public:
         encrypted = 0;//???
         pageCount = 0;
         Id=-1;
+        size = 0;      /* patch dxfrw_c: erau neinitializate */
+        maxSize = 0;
+        address = 0;
     }
     ~dwgSectionInfo(){}
     dint32 Id; //section Id, 2000-   rd15 rd18
@@ -120,6 +124,8 @@ public:
 class dwgReader {
     friend class dwgR;
 public:
+    /* patch dxfrw_c: cate obiecte nu au putut fi decodate (se raporteaza apelantului) */
+    duint32 failedObjects = 0;
     dwgReader(std::ifstream *stream, dwgR *p){
         fileBuf = new dwgBuffer(stream);
         parent = p;
@@ -161,6 +167,7 @@ protected:
     bool readDwgEntities(DRW_Interface& intfa, dwgBuffer *dbuf);
     bool readDwgObjects(DRW_Interface& intfa, dwgBuffer *dbuf);
     bool readPlineVertex(DRW_Polyline& pline, dwgBuffer *dbuf);
+    bool readInsertAttribs(DRW_Insert& ins, dwgBuffer *dbuf); /* patch dxfrw_c */
 
 public:
     std::map<duint32, objHandle>ObjectMap;
@@ -174,6 +181,7 @@ public:
     std::map<duint32, DRW_Vport*> vportmap;
     std::map<duint32, DRW_Block_Record*> blockRecordmap;
     std::map<duint32, DRW_AppId*> appIdmap;
+    std::map<duint32, std::string> attdefTags; /* patch dxfrw_c: eticheta fiecarui ATTDEF citit, dupa handle */
 //    duint32 currBlock;
     duint8 maintenanceVersion;
 

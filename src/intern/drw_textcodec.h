@@ -97,9 +97,6 @@ public:
     virtual std::string toUtf8(std::string *s);
  private:
     const char *encoding;
-    std::string convertByiconv(const char *in_encode,
-                               const char *out_encode,
-                               const std::string *s);
 };
 
 #endif // DRW_TEXTCODEC_H

@@ -31,6 +31,8 @@ public:
     bool getPreview();
     DRW::Version getVersion(){return version;}
     DRW::error getError(){return error;}
+    /* patch dxfrw_c: numarul de obiecte care nu au putut fi decodate la ultima citire */
+    duint32 getFailedObjects(){return failedObjects;}
 bool testReader();
     void setDebug(DRW::DBG_LEVEL lvl);
 
@@ -40,6 +42,7 @@ private:
 private:
     DRW::Version version;
     DRW::error error;
+    duint32 failedObjects = 0;   /* patch dxfrw_c */
     std::string fileName;
     bool applyExt; /*apply extrusion in entities to conv in 2D?*/
     std::string codePage;

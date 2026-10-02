@@ -17,6 +17,20 @@
 #include <iostream>
 //#include <iomanip>
 
+/* patch dxfrw_c: cu DRW_NO_DEBUG mesajele de depanare dispar la compilare. Altfel, fiecare apel
+   construia siruri temporare chiar si cu nivelul de depanare oprit, ceea ce incetinea mult citirea
+   (la DWG 2007+ apelurile sunt de ordinul milioanelor). */
+#ifdef DRW_NO_DEBUG
+/* ATENTIE: unele apeluri au efecte (de ex. DRW_DBG(buf->getBitShort()) avanseaza in fisier),
+   deci expresiile TREBUIE evaluate; se elimina doar formatarea si afisarea. */
+#define DRW_DBGSL(a) ((void)(a))
+#define DRW_DBGGL (DRW_dbg::NONE)
+#define DRW_DBG(a) ((void)(a))
+#define DRW_DBGH(a) ((void)(a))
+#define DRW_DBGB(a) ((void)(a))
+#define DRW_DBGHL(a, b, c) ((void)(a), (void)(b), (void)(c))
+#define DRW_DBGPT(a, b, c) ((void)(a), (void)(b), (void)(c))
+#else
 #define DRW_DBGSL(a) DRW_dbg::getInstance()->setLevel(a)
 #define DRW_DBGGL DRW_dbg::getInstance()->getLevel()
 #define DRW_DBG(a) DRW_dbg::getInstance()->print(a)
@@ -24,6 +38,7 @@
 #define DRW_DBGB(a) DRW_dbg::getInstance()->printB(a)
 #define DRW_DBGHL(a, b, c) DRW_dbg::getInstance()->printHL(a, b ,c)
 #define DRW_DBGPT(a, b, c) DRW_dbg::getInstance()->printPT(a, b, c)
+#endif
 
 
 class print_none;

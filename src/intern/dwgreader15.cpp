@@ -47,8 +47,11 @@ bool dwgReader15::readFileHeader() {
         return false;
     duint32 count = fileBuf->getRawLong32();
     DRW_DBG("count records= "); DRW_DBG(count); DRW_DBG("\n");
+    /* patch dxfrw_c: un fisier corupt putea cere miliarde de inregistrari si citea la infinit dupa EOF */
+    if (!fileBuf->isGood() || count > 64)
+        return false;
 
-    for (unsigned int i = 0; i < count; i++) {
+    for (unsigned int i = 0; i < count && fileBuf->isGood(); i++) {
         duint8 rec = fileBuf->getRawChar8();
         duint32 address = fileBuf->getRawLong32();
         duint32 size = fileBuf->getRawLong32();
@@ -81,7 +84,7 @@ bool dwgReader15::readFileHeader() {
             DRW_DBG(address); DRW_DBG(" size= "); DRW_DBG(size);
             sections[secEnum::AUXHEADER] = si;
         } else {
-            std::cerr << "\nUnsupported section number\n";
+            DRW_DBG("\nUnsupported section number\n"); /* patch dxfrw_c: fara iesire pe stderr */
         }
     }
     if (! fileBuf->isGood())
@@ -122,7 +125,7 @@ bool dwgReader15::readDwgHeader(DRW_Header& hdr){
         return false;
     if (!fileBuf->setPosition(si.address))
         return false;
-    duint8 *tmpByteStr = new duint8[si.size];
+    duint8 *tmpByteStr = new duint8[si.size]();
     fileBuf->getBytes(tmpByteStr, si.size);
     dwgBuffer buff(tmpByteStr, si.size, &decoder);
     DRW_DBG("Header section sentinel= ");
@@ -149,13 +152,18 @@ bool dwgReader15::readDwgClasses(){
         DRW_DBG("\nWARNING dwgReader15::readDwgClasses size are "); DRW_DBG(size);
         DRW_DBG(" and secSize - 38 are "); DRW_DBG(si.size - 38); DRW_DBG("\n");
     }
-    duint8 *tmpByteStr = new duint8[size];
+    duint8 *tmpByteStr = new duint8[size]();
     fileBuf->getBytes(tmpByteStr, size);
     dwgBuffer buff(tmpByteStr, size, &decoder);
     size--; //reduce 1 byte instead of check pos + bitPos
-    while (size > buff.getPosition()) {
+    while (size > buff.getPosition() && buff.isGood()) { /* patch dxfrw_c */
         DRW_Class *cl = new DRW_Class();
         cl->parseDwg(version, &buff, &buff);
+        { /* patch dxfrw_c: clasa duplicata (fisier corupt) nu mai pierde obiectul vechi */
+            std::map<duint32, DRW_Class*>::iterator old = classesmap.find(cl->classNum);
+            if (old != classesmap.end())
+                delete old->second;
+        }
         classesmap[cl->classNum] = cl;
     }
      DRW_DBG("\nCRC: "); DRW_DBGH(fileBuf->getRawShort16());

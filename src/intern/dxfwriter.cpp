@@ -14,6 +14,8 @@
 #include <fstream>
 #include <string>
 #include <algorithm>
+#include <cstring>
+#include <sstream>
 #include "dxfwriter.h"
 
 //RLZ TODO change std::endl to x0D x0A (13 10)
@@ -96,6 +98,24 @@ bool dxfWriter::writeUtf8String(int code, std::string text) {
     return writeString(code, t);
 }
 
+bool dxfWriter::writeSymbolName(int code, std::string text) {
+    /* patch dxfrw_c: in R12 numele admit doar litere, cifre, "$", "_", "-"; "*" doar ca prefix de bloc
+       anonim (*U, *D, *X). Caracterele non-ASCII raman si sunt codificate ca \\U+XXXX de encoder. */
+    for (size_t i = 0; i < text.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c >= 0x80) continue;
+        if (c >= 'a' && c <= 'z') { text[i] = static_cast<char>(c - 32); continue; }
+        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '$' || c == '_' || c == '-') continue;
+        if (i == 0 && c == '*' && text.size() > 1) {
+            char n = text[1];
+            if (n == 'U' || n == 'u' || n == 'D' || n == 'd' || n == 'X' || n == 'x') continue;
+        }
+        text[i] = '_';
+    }
+    std::string t = encoder.fromUtf8(text);
+    return writeString(code, t);
+}
+
 bool dxfWriter::writeUtf8Caps(int code, std::string text) {
     std::string strname = text;
     std::transform(strname.begin(), strname.end(), strname.begin(),::toupper);
@@ -142,76 +162,99 @@ bool dxfWriterBinary::writeString(int code, std::string text) {
     return (filestr->good());
 }*/
 
+/* patch dxfrw_c: in DXF binar marimea fiecarei valori este data de CODUL de grup, nu de functia apelata.
+   Biblioteca apela uneori functia gresita (de ex. writeInt16 pentru 91, un intreg pe 32 de biti, la HATCH;
+   writeDouble pentru 76 la LEADER); in ASCII nu conteaza, in binar tot ce urma era citit decalat.
+   Scrierea binara alege acum formatul dupa tabelul de tipuri din specificatia DXF. */
+namespace {
+enum DrwBinType { BT_UNKNOWN, BT_STRING, BT_DOUBLE, BT_INT16, BT_INT32, BT_INT64, BT_BOOL };
+
+DrwBinType drwBinTypeOf(int c) {
+    if (c >= 0 && c <= 9) return BT_STRING;
+    if (c >= 10 && c <= 59) return BT_DOUBLE;
+    if (c >= 60 && c <= 79) return BT_INT16;
+    if (c >= 90 && c <= 99) return BT_INT32;
+    if (c == 100 || c == 102 || c == 105) return BT_STRING;
+    if (c >= 110 && c <= 149) return BT_DOUBLE;
+    if (c >= 160 && c <= 169) return BT_INT64;
+    if (c >= 170 && c <= 179) return BT_INT16;
+    if (c >= 210 && c <= 239) return BT_DOUBLE;
+    if (c >= 270 && c <= 289) return BT_INT16;
+    if (c >= 290 && c <= 299) return BT_BOOL;
+    if (c >= 300 && c <= 369) return BT_STRING;
+    if (c >= 370 && c <= 389) return BT_INT16;
+    if (c >= 390 && c <= 399) return BT_STRING;
+    if (c >= 400 && c <= 409) return BT_INT16;
+    if (c >= 410 && c <= 419) return BT_STRING;
+    if (c >= 420 && c <= 429) return BT_INT32;
+    if (c >= 430 && c <= 439) return BT_STRING;
+    if (c >= 440 && c <= 459) return BT_INT32;
+    if (c >= 460 && c <= 469) return BT_DOUBLE;
+    if (c >= 470 && c <= 481) return BT_STRING;
+    if (c == 999) return BT_STRING;
+    if (c >= 1000 && c <= 1009) return BT_STRING;
+    if (c >= 1010 && c <= 1059) return BT_DOUBLE;
+    if (c >= 1060 && c <= 1070) return BT_INT16;
+    if (c == 1071) return BT_INT32;
+    return BT_UNKNOWN;
+}
+
+void drwPutCode(std::ofstream *f, int code) {
+    char b[2] = { static_cast<char>(code & 0xFF), static_cast<char>((code >> 8) & 0xFF) };
+    f->write(b, 2);
+}
+void drwPutLE(std::ofstream *f, unsigned long long v, int bytes) {
+    char b[8];
+    for (int i = 0; i < bytes; ++i) b[i] = static_cast<char>((v >> (8 * i)) & 0xFF);
+    f->write(b, bytes);
+}
+void drwPutDouble(std::ofstream *f, double d) {
+    unsigned long long u;
+    memcpy(&u, &d, 8);
+    drwPutLE(f, u, 8);
+}
+bool drwEmit(std::ofstream *f, int code, long long iv, double dv, bool isDouble, DrwBinType callType) {
+    DrwBinType t = drwBinTypeOf(code);
+    if (t == BT_UNKNOWN) t = callType;
+    long long ival = isDouble ? static_cast<long long>(dv < 0 ? dv - 0.5 : dv + 0.5) : iv;
+    double dval = isDouble ? dv : static_cast<double>(iv);
+    drwPutCode(f, code);
+    switch (t) {
+    case BT_DOUBLE: drwPutDouble(f, dval); break;
+    case BT_INT16:  drwPutLE(f, static_cast<unsigned long long>(ival), 2); break;
+    case BT_INT32:  drwPutLE(f, static_cast<unsigned long long>(ival), 4); break;
+    case BT_INT64:  drwPutLE(f, static_cast<unsigned long long>(ival), 8); break;
+    case BT_BOOL: { char b = static_cast<char>(ival != 0 ? 1 : 0); f->write(&b, 1); break; }
+    case BT_STRING: default: {
+        std::ostringstream os;
+        if (isDouble) { os.precision(16); os << dval; } else os << ival;
+        std::string txt = os.str();
+        f->write(txt.c_str(), txt.size() + 1);
+        break;
+    }
+    }
+    return f->good();
+}
+} // namespace
+
 bool dxfWriterBinary::writeInt16(int code, int data) {
-    char bufcode[2];
-    char buffer[2];
-    bufcode[0] =code & 0xFF;
-    bufcode[1] =code  >> 8;
-    buffer[0] =data & 0xFF;
-    buffer[1] =data  >> 8;
-    filestr->write(bufcode, 2);
-    filestr->write(buffer, 2);
-    return (filestr->good());
+    return drwEmit(filestr, code, data, 0.0, false, BT_INT16);
 }
 
 bool dxfWriterBinary::writeInt32(int code, int data) {
-    char buffer[4];
-    buffer[0] =code & 0xFF;
-    buffer[1] =code  >> 8;
-    filestr->write(buffer, 2);
-
-    buffer[0] =data & 0xFF;
-    buffer[1] =data  >> 8;
-    buffer[2] =data  >> 16;
-    buffer[3] =data  >> 24;
-    filestr->write(buffer, 4);
-    return (filestr->good());
+    return drwEmit(filestr, code, data, 0.0, false, BT_INT32);
 }
 
 bool dxfWriterBinary::writeInt64(int code, unsigned long long int data) {
-    char buffer[8];
-    buffer[0] =code & 0xFF;
-    buffer[1] =code  >> 8;
-    filestr->write(buffer, 2);
-
-    buffer[0] =data & 0xFF;
-    buffer[1] =data  >> 8;
-    buffer[2] =data  >> 16;
-    buffer[3] =data  >> 24;
-    buffer[4] =data  >> 32;
-    buffer[5] =data  >> 40;
-    buffer[6] =data  >> 48;
-    buffer[7] =data  >> 56;
-    filestr->write(buffer, 8);
-    return (filestr->good());
+    return drwEmit(filestr, code, static_cast<long long>(data), 0.0, false, BT_INT64);
 }
 
 bool dxfWriterBinary::writeDouble(int code, double data) {
-    char bufcode[2];
-    char buffer[8];
-    bufcode[0] =code & 0xFF;
-    bufcode[1] =code  >> 8;
-    filestr->write(bufcode, 2);
-
-    unsigned char *val;
-    val = (unsigned char *) &data;
-    for (int i=0; i<8; i++) {
-        buffer[i] =val[i];
-    }
-    filestr->write(buffer, 8);
-    return (filestr->good());
+    return drwEmit(filestr, code, 0, data, true, BT_DOUBLE);
 }
 
-//saved as int or add a bool member??
 bool dxfWriterBinary::writeBool(int code, bool data) {
-    char buffer[1];
-    char bufcode[2];
-    bufcode[0] =code & 0xFF;
-    bufcode[1] =code  >> 8;
-    filestr->write(bufcode, 2);
-    buffer[0] = data;
-    filestr->write(buffer, 1);
-    return (filestr->good());
+    return drwEmit(filestr, code, data ? 1 : 0, 0.0, false, BT_BOOL);
 }
 
 dxfWriterAscii::dxfWriterAscii(std::ofstream *stream):dxfWriter(stream){

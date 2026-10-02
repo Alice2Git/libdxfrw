@@ -121,6 +121,13 @@ public:
     /** Called for every Text entity. */
     virtual void addText(const DRW_Text& data) = 0;
 
+    /** patch dxfrw_c: Called for every attribute definition (ATTDEF). The attributes of an insert
+        (ATTRIB) are delivered in DRW_Insert::attributes. Default: ignored. */
+    virtual void addAttdef(const DRW_Attdef& data) { (void)data; }
+
+    /** patch dxfrw_c: Called for every MULTILEADER entity. Default: ignored. */
+    virtual void addMLeader(const DRW_MLeader* data) { (void)data; }
+
     /**
      * Called for every aligned dimension entity. 
      */

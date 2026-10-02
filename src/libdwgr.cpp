@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <sstream>
 #include "intern/drw_dbg.h"
+#include "intern/drw_utf8path.h"
 #include "intern/drw_textcodec.h"
 #include "intern/dwgreader.h"
 #include "intern/dwgreader15.h"
@@ -48,7 +49,8 @@ dwgR::dwgR(const char* name){
 
 dwgR::~dwgR(){
     if (reader != NULL)
-        delete reader;
+        failedObjects += reader->failedObjects;   /* patch dxfrw_c */
+    delete reader;
 
 }
 
@@ -79,7 +81,8 @@ bool dwgR::getPreview(){
 
     filestr.close();
     if (reader != NULL) {
-        delete reader;
+        failedObjects += reader->failedObjects;   /* patch dxfrw_c */
+    delete reader;
         reader = NULL;
     }
     return isOk;
@@ -89,7 +92,7 @@ bool dwgR::testReader(){
     bool isOk = false;
 
     std::ifstream filestr;
-    filestr.open (fileName.c_str(), std::ios_base::in | std::ios::binary);
+    drw_open_file(filestr, fileName, std::ios_base::in | std::ios::binary);
     if (!filestr.is_open() || !filestr.good() ){
         error = DRW::BAD_OPEN;
         return isOk;
@@ -164,7 +167,8 @@ bool dwgR::read(DRW_Interface *interface_, bool ext){
 
     filestr.close();
     if (reader != NULL) {
-        delete reader;
+        failedObjects += reader->failedObjects;   /* patch dxfrw_c */
+    delete reader;
         reader = NULL;
     }
 
@@ -180,7 +184,7 @@ bool dwgR::read(DRW_Interface *interface_, bool ext){
 bool dwgR::openFile(std::ifstream *filestr){
     bool isOk = false;
     DRW_DBG("dwgR::read 1\n");
-    filestr->open (fileName.c_str(), std::ios_base::in | std::ios::binary);
+    drw_open_file(*filestr, fileName, std::ios_base::in | std::ios::binary);
     if (!filestr->is_open() || !filestr->good() ){
         error = DRW::BAD_OPEN;
         return isOk;

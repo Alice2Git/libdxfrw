@@ -39,9 +39,9 @@ public:
 
 private:
     duint32 litLength18();
-    static duint32 litLength21(duint8 *cbuf, duint8 oc, duint32 *si);
+    static duint32 litLength21(duint8 *cbuf, duint8 oc, duint32 *si, duint32 csize); /* patch dxfrw_c */
     static void copyCompBytes21(duint8 *cbuf, duint8 *dbuf, duint32 l, duint32 si, duint32 di);
-    static void readInstructions21(duint8 *cbuf, duint32 *si, duint8 *oc, duint32 *so, duint32 *l);
+    static void readInstructions21(duint8 *cbuf, duint32 *si, duint8 *oc, duint32 *so, duint32 *l, duint32 csize); /* patch dxfrw_c */
 
     duint32 longCompressionOffset();
     duint32 long20CompressionOffset();
@@ -53,6 +53,10 @@ private:
     duint32 sizeD;
     duint32 pos;
     duint32 rpos;
+    /* patch dxfrw_c: acces verificat la bufferul comprimat */
+    bool failed;
+    duint8 getC();
+    bool copyLiterals18(duint32 count);
 
 };
 

@@ -22,6 +22,9 @@ public:
     virtual bool writeString(int code, std::string text) = 0;
     bool writeUtf8String(int code, std::string text);
     bool writeUtf8Caps(int code, std::string text);
+    /* patch dxfrw_c: nume simbolic R12 (layer, tip de linie, stil, bloc): majuscule si caractere
+       nepermise inlocuite cu "_" (spatiile sau "*" la inceput blocau AutoCAD/TrueView) */
+    bool writeSymbolName(int code, std::string text);
     std::string fromUtf8String(std::string t) {return encoder.fromUtf8(t);}
     virtual bool writeInt16(int code, int data) = 0;
     virtual bool writeInt32(int code, int data) = 0;

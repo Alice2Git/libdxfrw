@@ -9,9 +9,7 @@ LABEL description="Build environment for libdxfrw on Amazon Linux 2023"
 # Install build dependencies
 RUN dnf -y groupinstall "Development Tools" && \
     dnf -y install \
-    autoconf \
-    automake \
-    libtool \
+    cmake \
     pkg-config \
     tar \
     gzip \

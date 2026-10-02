@@ -21,9 +21,9 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         include:
           - os: ubuntu-latest
-            install_deps: sudo apt-get update && sudo apt-get install -y libiconv-hook-dev || true
+            install_deps: sudo apt-get update && sudo apt-get install -y cmake
           - os: macos-latest
-            install_deps: brew install libiconv || true
+            install_deps: brew install cmake || true
 
     runs-on: ${{ matrix.os }}
 

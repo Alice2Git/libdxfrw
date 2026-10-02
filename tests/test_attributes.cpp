@@ -566,9 +566,9 @@ bool testLineTypeScale() {
             return false;
         }
 
-        // Library uses default value 1.0 since code 48 is not written
-        if (!approxEqual(reader.lastLine.ltypeScale, 1.0)) {
-            std::cout << "✗ LT scale should default to 1.0, got "
+        // patch dxfrw_c: code 48 is now written, value must round-trip
+        if (!approxEqual(reader.lastLine.ltypeScale, 2.5)) {
+            std::cout << "✗ LT scale should round-trip as 2.5, got "
                       << reader.lastLine.ltypeScale << std::endl;
             std::remove(filename);
             return false;

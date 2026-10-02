@@ -3,7 +3,6 @@
 #include <iomanip>
 #include <algorithm>
 #include <cstring>
-#include <iconv.h>
 #include "../drw_base.h"
 #include "drw_cptables.h"
 #include "drw_cptable932.h"
@@ -55,9 +54,6 @@ void DRW_TextCodec::setVersion(std::string *v, bool dxfFormat){
 }
 
 void DRW_TextCodec::setCodePage(std::string *c, bool dxfFormat){
-    static int min_ver = 10;
-    min_ver = std::min(min_ver, version);
-
     cp = correctCodePage(*c);
     delete conv;
     if (version == DRW::AC1009 || version == DRW::AC1015) {
@@ -79,6 +75,8 @@ void DRW_TextCodec::setCodePage(std::string *c, bool dxfFormat){
             conv = new DRW_ConvTable(DRW_Table1250, CPLENGHTCOMMON);
         else if (cp == "ANSI_1251")
             conv = new DRW_ConvTable(DRW_Table1251, CPLENGHTCOMMON);
+        else if (cp == "ANSI_1252") /* patch dxfrw_c: tabelul exista, dar nu era folosit (cadea pe iconv "SJIS") */
+            conv = new DRW_ConvTable(DRW_Table1252, CPLENGHTCOMMON);
         else if (cp == "ANSI_1253")
             conv = new DRW_ConvTable(DRW_Table1253, CPLENGHTCOMMON);
         else if (cp == "ANSI_1254")
@@ -93,19 +91,17 @@ void DRW_TextCodec::setCodePage(std::string *c, bool dxfFormat){
             conv = new DRW_ConvTable(DRW_Table1258, CPLENGHTCOMMON);
         else if (cp == "UTF-8") { //DXF older than 2007 are write in win codepages
             cp = "ANSI_1252";
-            conv = new DRW_ExtConverter("SJIS");
+            conv = new DRW_ConvTable(DRW_Table1252, CPLENGHTCOMMON); /* patch dxfrw_c */
         } else {
             conv = new DRW_ExtConverter("SJIS");
         }
     } else {
-        if (min_ver <= DRW::AC1018) {
-            conv = new DRW_ExtConverter("SJIS");
-        } else {
-            if (dxfFormat)
-                conv = new DRW_Converter(NULL, 0);//utf16 to utf8
-            else
-                conv = new DRW_ConvUTF16();//utf16 to utf8
-        }
+        /* patch dxfrw_c: eliminata variabila statica min_ver (stare globala la nivel de proces:
+           dupa un singur fisier R2000/2004, toate fisierele 2007+ foloseau convertorul gresit). */
+        if (dxfFormat)
+            conv = new DRW_Converter(NULL, 0);//utf16 to utf8
+        else
+            conv = new DRW_ConvUTF16();//utf16 to utf8
     }
 }
 
@@ -471,31 +467,37 @@ std::string DRW_ConvUTF16::toUtf8(std::string *s){//RLZ: pending to write
     return res;
 }
 
-std::string DRW_ExtConverter::convertByiconv(const char *in_encode,
-                                             const char *out_encode,
-                                             const std::string *s) {
-    const int BUF_SIZE = 1000;
-    static char in_buf[BUF_SIZE], out_buf[BUF_SIZE];
-
-	char *in_ptr = in_buf;
-	char *out_ptr = out_buf;
-    strncpy(in_buf, s->c_str(), BUF_SIZE);
-
-    iconv_t ic;
-    ic = iconv_open(out_encode, in_encode);
-    size_t il = BUF_SIZE-1, ol = BUF_SIZE-1;
-    iconv(ic , (char**)&in_ptr, &il, &out_ptr, &ol);
-    iconv_close(ic);
-
-    return std::string(out_buf);
-}
-
+/* patch dxfrw_c: convertor fara iconv (indisponibil in MSVC/MinGW, buffere statice de 1000 octeti).
+   Code page necunoscut: la scriere caracterele non-ASCII devin secvente \\U+XXXX (DXF valid),
+   la citire se decodeaza secventele \\U+XXXX, restul octetilor raman neschimbati. */
 std::string DRW_ExtConverter::fromUtf8(std::string *s){
-    return convertByiconv("UTF8", this->encoding, s);
+    std::string result;
+    for (size_t i = 0; i < s->size(); ) {
+        unsigned char c = static_cast<unsigned char>((*s)[i]);
+        if (c < 0x80) {
+            result += static_cast<char>(c);
+            ++i;
+            continue;
+        }
+        int len = 1;
+        if ((c & 0xE0) == 0xC0) len = 2;
+        else if ((c & 0xF0) == 0xE0) len = 3;
+        else if ((c & 0xF8) == 0xF0) len = 4;
+        if (len == 1 || i + len > s->size()) { /* octet invalid: pastrat ca atare */
+            result += static_cast<char>(c);
+            ++i;
+            continue;
+        }
+        int consumed = 0;
+        int code = decodeNum(s->substr(i, len), &consumed);
+        result += decodeText(code);
+        i += len;
+    }
+    return result;
 }
 
 std::string DRW_ExtConverter::toUtf8(std::string *s){
-    return convertByiconv(this->encoding, "UTF8", s);
+    return DRW_Converter::toUtf8(s);
 }
 
 std::string DRW_TextCodec::correctCodePage(const std::string& s) {

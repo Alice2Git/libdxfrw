@@ -120,6 +120,12 @@ bool dwgFileStream::setPos(duint64 p){
 
 bool dwgFileStream::read(duint8* s, duint64 n){
     stream->read (reinterpret_cast<char*>(s),n);
+    /* patch dxfrw_c: dupa EOF octetii necititi erau lasati neinitializati (valori aleatoare,
+       bucle "citeste pana la 0" infinite); se completeaza cu zero */
+    std::streamsize got = stream->gcount();
+    if (got < 0) got = 0;
+    for (duint64 i = static_cast<duint64>(got); i < n; ++i)
+        s[i] = 0;
     return stream->good();
 }
 
@@ -134,7 +140,10 @@ bool dwgCharStream::setPos(duint64 p){
 }
 
 bool dwgCharStream::read(duint8* s, duint64 n){
-    if ( n > (sz - pos) ) {
+    if ( pos > sz || n > (sz - pos) ) {
+        /* patch dxfrw_c: octetii necititi se completeaza cu zero */
+        for (duint64 i = 0; i < n; ++i)
+            s[i] = 0;
         isOk = false;
         return false;
     }
@@ -273,26 +282,12 @@ duint8 dwgBuffer::get2Bits(){
 /**Reads thee Bits returns a char (3B) **/
 //RLZ: todo verify this
 duint8 dwgBuffer::get3Bits(){
-    duint8 buffer;
-    duint8 ret = 0;
-    if (bitPos == 0){
-        filestr->read (&buffer,1);
-        currByte = buffer;
-    }
-
-    bitPos +=3;
-    if (bitPos < 9)
-        ret = currByte >>(8 - bitPos);
-    else {//read one bit per byte
-        ret = currByte << 1;
-        filestr->read (&buffer,1);
-        currByte = buffer;
-        bitPos = 1;
-        ret = ret | currByte >> 7;
-    }
-    if (bitPos == 8)
-        bitPos = 0;
-    ret = ret & 7;
+    /* patch dxfrw_c: cand cei 3 biti incepeau pe ultimul bit al unui octet, se lua un singur bit din
+       octetul urmator in loc de doi (valoare gresita si pozitie decalata); de ex. lungimea BLL a
+       graficii proxy a entitatilor. Se citesc acum bit cu bit. */
+    duint8 ret = getBit();
+    ret = static_cast<duint8>((ret << 1) | getBit());
+    ret = static_cast<duint8>((ret << 1) | getBit());
     return ret;
 }
 
@@ -340,9 +335,10 @@ dint32 dwgBuffer::getBitLong(){
 duint64 dwgBuffer::getBitLongLong(){
     dint8 b = get3Bits();
     duint64 ret=0;
+    /* patch dxfrw_c: octetii erau asamblati in ordine inversa (big-endian), desi formatul (si comentariul
+       de mai sus) cer little-endian; valorile pe mai mult de un octet ieseau gresite */
     for (duint8 i=0; i<b; i++){
-        ret = ret << 8;
-        ret |= getRawChar8();
+        ret |= static_cast<duint64>(getRawChar8()) << (8 * i);
     }
     return ret;
 }
@@ -565,10 +561,12 @@ std::string dwgBuffer::get8bitStr(){
     duint16 textSize = getBitShort();
     if (textSize == 0)
         return std::string();
-    duint8 *tmpBuffer = new duint8[textSize];
+    duint8 *tmpBuffer = new duint8[textSize]();
     bool good = getBytes(tmpBuffer, textSize);
-    if (!good)
+    if (!good) {
+        delete[] tmpBuffer; /* patch dxfrw_c: bufferul se pierdea pe calea de eroare */
         return std::string();
+    }
 
 /*    filestr->read (buffer,textSize);
     if (!filestr->good())
@@ -597,10 +595,12 @@ std::string dwgBuffer::get16bitStr(duint16 textSize, bool nullTerm){
     duint16 ts = textSize;
     if (nullTerm)
         ts += 2;
-    duint8 *tmpBuffer = new duint8[textSize + 2];
+    duint8 *tmpBuffer = new duint8[textSize + 2]();
     bool good = getBytes(tmpBuffer, ts);
-    if (!good)
+    if (!good) {
+        delete[] tmpBuffer; /* patch dxfrw_c: bufferul se pierdea pe calea de eroare */
         return std::string();
+    }
     if (!nullTerm) {
         tmpBuffer[textSize] = '\0';
         tmpBuffer[textSize + 1] = '\0';
@@ -841,6 +841,8 @@ duint16 dwgBuffer::getBERawShort16(){
 
 /* reads "size" bytes and stores in "buf" return false if fail */
 bool dwgBuffer::getBytes(unsigned char *buf, int size){
+    if (size < 0 || buf == NULL) /* patch dxfrw_c: dimensiune negativa din fisier corupt */
+        return false;
     duint8 tmp;
     filestr->read (buf,size);
     if (!filestr->good())
@@ -860,12 +862,18 @@ duint16 dwgBuffer::crc8(duint16 dx,dint32 start,dint32 end){
     int pos = filestr->getPos();
     filestr->setPos(start);
     int n = end-start;
-    duint8 *tmpBuf = new duint8[n];
+    if (n <= 0) { /* patch dxfrw_c: interval invalid din fisier corupt */
+        filestr->setPos(pos);
+        return 0;
+    }
+    duint8 *tmpBuf = new duint8[n]();
     duint8 *p = tmpBuf;
     filestr->read (tmpBuf,n);
     filestr->setPos(pos);
-    if (!filestr->good())
+    if (!filestr->good()) {
+        delete[] tmpBuf; /* patch dxfrw_c: bufferul se pierdea pe calea de eroare */
         return 0;
+    }
 
     duint8 al;
 
@@ -883,12 +891,18 @@ duint32 dwgBuffer::crc32(duint32 seed,dint32 start,dint32 end){
     int pos = filestr->getPos();
     filestr->setPos(start);
     int n = end-start;
-    duint8 *tmpBuf = new duint8[n];
+    if (n <= 0) { /* patch dxfrw_c: interval invalid din fisier corupt */
+        filestr->setPos(pos);
+        return 0;
+    }
+    duint8 *tmpBuf = new duint8[n]();
     duint8 *p = tmpBuf;
     filestr->read (tmpBuf,n);
     filestr->setPos(pos);
-    if (!filestr->good())
+    if (!filestr->good()) {
+        delete[] tmpBuf; /* patch dxfrw_c: bufferul se pierdea pe calea de eroare */
         return 0;
+    }
 
     duint32 invertedCrc = ~seed;
     while (n-- > 0) {

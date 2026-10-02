@@ -1,3 +1,15 @@
+dxfrw_c fork, October 2026 (based on codelibs/libdxfrw bf80b74)
+
+    DWG: complete reading of all 9,735 DWG files of a production set (R2007 decompression,
+    proxy graphics in 2010+, hatch spline edges, XDATA, anonymous block names).
+    New entities: ATTRIB/ATTDEF and MULTILEADER (DWG/DXF read, DXF write).
+    DXF write: hatch polyline boundaries, XDATA, extrusion, LEADER/VIEWPORT/IMAGE fixes,
+    AutoCAD compatibility for R12-2018. No iconv dependency; UTF-8 paths on Windows.
+    DRW_Entity copy constructor keeps the color name (430); DWG 2D vertex ID read only in
+    2010+; DIMSTYLE DIMLWD/DIMLWE read from DXF.
+    Build: CMake only (Autotools, VS2013 and makefile.mingw removed).
+    Details: DXFRW_C_PATCHES.md.
+
 Author: Rallaz <rallazz@gmail.com>
 Date:   Mon Sep 10 17:39:05 2012 +0200
 

@@ -21,6 +21,7 @@
 
 class dxfReader;
 class dwgBuffer;
+class DRW_TextCodec; /* patch dxfrw_c: folosit la decodarea XDATA din DWG */
 class DRW_Polyline;
 
 namespace DRW {
@@ -31,8 +32,8 @@ namespace DRW {
 //        E3DSOLID, //encripted propietry data
 //        ACAD_PROXY_ENTITY,
         ARC,
-//        ATTDEF,
-//        ATTRIB,
+        ATTDEF,     /* patch dxfrw_c: atributele de bloc sunt acum citite si scrise */
+        ATTRIB,
         BLOCK,// and ENDBLK
 //        BODY, //encripted propietry data
         CIRCLE,
@@ -56,7 +57,7 @@ namespace DRW {
 //        MESH,
 //        MLINE,
 //        MLEADERSTYLE,
-//        MLEADER,
+        MLEADER,    /* patch dxfrw_c: MULTILEADER */
         MTEXT,
 //        OLEFRAME,
 //        OLE2FRAME,
@@ -111,7 +112,12 @@ public:
                   ownerHandle(false), xDictFlag(0), numReactors(0), objSize(0), oType(0), extAxisX(DRW_Coord()),
                   extAxisY(DRW_Coord()), curr(NULL) {}
 
-    DRW_Entity(const DRW_Entity& e) {
+    /* patch dxfrw_c: copia pierdea numele culorii (cod 430), datele de aplicatie (102) si grafica
+       proxy (310) si lasa neinitializate campurile numerice folosite la citirea DWG; atributele unui
+       INSERT sunt tinute prin copiere */
+    DRW_Entity(const DRW_Entity& e): appData(e.appData), numProxyGraph(0), proxyGraphics(e.proxyGraphics),
+                                     colorName(e.colorName), haveNextLinks(0), plotFlags(0), ltFlags(0),
+                                     materialFlag(0), shadowFlag(0), objSize(0), oType(0) {
         eType = e.eType;
         handle = e.handle;
         parentHandle = e.parentHandle; //no handle (0)
@@ -167,6 +173,9 @@ protected:
     bool parseDwg(DRW::Version version, dwgBuffer *buf, dwgBuffer* strBuf, duint32 bs=0);
     //parses dwg common handles part to read entity
     bool parseDwgEntHandle(DRW::Version version, dwgBuffer *buf);
+    /* patch dxfrw_c: decodarea datelor extinse (XDATA) din DWG */
+    bool parseDwgExtData(DRW::Version version, duint8 *data, int size, duint32 appHandle,
+                         DRW_TextCodec *decoder);
 
     //parses dxf 102 groups to read entity
     bool parseDxfGroups(int code, dxfReader *reader);
@@ -530,46 +539,8 @@ private:
 };
 
 
-//! Class to handle insert entries
-/*!
-*  Class to handle insert entries
-*  @author Rallaz
-*/
-class DRW_Insert : public DRW_Point {
-    SETENTFRIENDS
-public:
-    DRW_Insert() {
-        eType = DRW::INSERT;
-        xscale = 1;
-        yscale = 1;
-        zscale = 1;
-        angle = 0;
-        colcount = 1;
-        rowcount = 1;
-        colspace = 0;
-        rowspace = 0;
-    }
-
-    virtual void applyExtrusion(){DRW_Point::applyExtrusion();}
-
-protected:
-    void parseCode(int code, dxfReader *reader);
-    virtual bool parseDwg(DRW::Version v, dwgBuffer *buf, duint32 bs=0);
-
-public:
-    UTF8STRING name;         /*!< block name, code 2 */
-    double xscale;           /*!< x scale factor, code 41 */
-    double yscale;           /*!< y scale factor, code 42 */
-    double zscale;           /*!< z scale factor, code 43 */
-    double angle;            /*!< rotation angle in radians, code 50 */
-    int colcount;            /*!< column count, code 70 */
-    int rowcount;            /*!< row count, code 71 */
-    double colspace;         /*!< column space, code 44 */
-    double rowspace;         /*!< row space, code 45 */
-public: //only for read dwg
-    dwgHandle blockRecH;
-    dwgHandle seqendH; //RLZ: on implement attrib remove this handle from obj list (see pline/vertex code)
-};
+/* patch dxfrw_c: clasa DRW_Insert a fost mutata dupa DRW_Text, pentru ca acum contine atributele
+   (DRW_Attrib, derivata din DRW_Text) */
 
 //! Class to handle lwpolyline entity
 /*!
@@ -683,6 +654,8 @@ public:
 protected:
     void parseCode(int code, dxfReader *reader);
     virtual bool parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs=0);
+    /* patch dxfrw_c: partea de date comuna cu ATTRIB/ATTDEF (dupa datele comune ale entitatii) */
+    bool parseDwgTextBody(DRW::Version version, dwgBuffer *buf, dwgBuffer *sBuf);
 
 public:
     double height;             /*!< height text, code 40 */
@@ -695,6 +668,99 @@ public:
     enum HAlign alignH;        /*!< horizontal align, code 72 */
     enum VAlign alignV;        /*!< vertical align, code 73 */
     dwgHandle styleH;          /*!< handle for text style */
+};
+
+/* patch dxfrw_c: atributele de bloc (ATTRIB) si definitiile lor (ATTDEF) nu erau suportate deloc;
+   se pierdeau la citire (de ex. textele din cartuse). Un ATTRIB apartine unui INSERT si se pastreaza
+   in DRW_Insert::attributes; un ATTDEF este o entitate obisnuita (de regula in definitia unui bloc).
+   Atributele multi-linie (R2018, cu MTEXT incorporat) se citesc doar ca text pe un rand. */
+
+//! Class to handle attribute (ATTRIB) entities, also base for ATTDEF
+class DRW_Attrib : public DRW_Text {
+    SETENTFRIENDS
+public:
+    DRW_Attrib() {
+        eType = DRW::ATTRIB;
+        flags = 0;
+        fieldLength = 0;
+        lockPosition = false;
+        embeddedMText = false;
+        haveTag = false;
+        inAttribSubclass = false;
+    }
+
+protected:
+    void parseCode(int code, dxfReader *reader);
+    virtual bool parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs=0);
+
+public:
+    UTF8STRING tag;            /*!< attribute tag, code 2 */
+    UTF8STRING prompt;         /*!< prompt string, code 3 (only ATTDEF) */
+    int flags;                 /*!< 1 invisible, 2 constant, 4 verify, 8 preset, code 70 */
+    int fieldLength;           /*!< field length (not used), code 73 */
+    bool lockPosition;         /*!< lock position flag, code 280 (R2010+ in DXF) */
+
+private:
+    bool embeddedMText;        /*!< dxf: after code 101 the codes belong to the embedded MTEXT */
+    bool haveTag;              /*!< dxf: first 280 is the version, the one after the tag the lock flag */
+    bool inAttribSubclass;     /*!< dxf: after "100 AcDbAttribute(Definition)" 71/72 are not text codes */
+};
+
+//! Class to handle attribute definition (ATTDEF) entities
+class DRW_Attdef : public DRW_Attrib {
+    SETENTFRIENDS
+public:
+    DRW_Attdef() {
+        eType = DRW::ATTDEF;
+    }
+};
+
+//! Class to handle insert entries
+/*!
+*  Class to handle insert entries
+*  @author Rallaz
+*/
+class DRW_Insert : public DRW_Point {
+    SETENTFRIENDS
+public:
+    DRW_Insert() {
+        eType = DRW::INSERT;
+        xscale = 1;
+        yscale = 1;
+        zscale = 1;
+        angle = 0;
+        colcount = 1;
+        rowcount = 1;
+        colspace = 0;
+        rowspace = 0;
+        hasAttribs = false;
+        firstAttribH = lastAttribH = 0;
+    }
+
+    virtual void applyExtrusion(){DRW_Point::applyExtrusion();}
+
+protected:
+    void parseCode(int code, dxfReader *reader);
+    virtual bool parseDwg(DRW::Version v, dwgBuffer *buf, duint32 bs=0);
+
+public:
+    UTF8STRING name;         /*!< block name, code 2 */
+    double xscale;           /*!< x scale factor, code 41 */
+    double yscale;           /*!< y scale factor, code 42 */
+    double zscale;           /*!< z scale factor, code 43 */
+    double angle;            /*!< rotation angle in radians, code 50 */
+    int colcount;            /*!< column count, code 70 */
+    int rowcount;            /*!< row count, code 71 */
+    double colspace;         /*!< column space, code 44 */
+    double rowspace;         /*!< row space, code 45 */
+    std::vector<DRW_Attrib> attributes; /*!< patch dxfrw_c: ATTRIB-urile insertiei (codul 66 = 1 la scriere) */
+public: //only for read dwg
+    dwgHandle blockRecH;
+    dwgHandle seqendH;
+    bool hasAttribs;                   /* patch dxfrw_c: handle-urile atributelor, rezolvate de dwgReader */
+    duint32 firstAttribH;              /* pana la R2000: primul si ultimul atribut din lista inlantuita */
+    duint32 lastAttribH;
+    std::vector<duint32> attribHandles; /* din R2004: lista completa */
 };
 
 //! Class to handle insert entries
@@ -850,6 +916,8 @@ public:
     DRW_Spline() {
         eType = DRW::SPLINE;
         flags = nknots = ncontrol = nfit = 0;
+        degree = 3;                        /* patch dxfrw_c: initializari lipsa */
+        controlpoint = fitpoint = NULL;
         tolknot = tolcontrol = tolfit = 0.0000001;
 
     }
@@ -931,6 +999,17 @@ public:
     std::vector<DRW_Entity *> objlist;      /*!< entities list */
 };
 
+//! O linie din definitia modelului de hasura (coduri 53, 43, 44, 45, 46, 79, 49)
+/* patch dxfrw_c: biblioteca retinea doar NUMARUL liniilor, nu si continutul lor */
+class DRW_HatchPatternLine {
+public:
+    DRW_HatchPatternLine() : angle(0.0) {}
+    double angle;
+    DRW_Coord base;
+    DRW_Coord offset;
+    std::vector<double> dashes;
+};
+
 //! Class to handle hatch entity
 /*!
 *  Class to handle hatch entity
@@ -948,6 +1027,7 @@ public:
         solid = hpattern = 1;
         deflines = doubleflag = 0;
         loop = NULL;
+        ispol = false; /* patch dxfrw_c: membru neinitializat, citit la primul cod 72 */
         clearEntities();
     }
 
@@ -980,6 +1060,7 @@ public:
     int deflines;              /*!< number of pattern definition lines, code 78 */
 
     std::vector<DRW_HatchLoop *> looplist;  /*!< polyline list */
+    std::vector<DRW_HatchPatternLine> patternLines; /*!< patch dxfrw_c: definitia modelului */
 
 private:
     void clearEntities(){
@@ -1047,6 +1128,10 @@ public:
         eType = DRW::IMAGE;
         fade = clip = 0;
         brightness = contrast = 50;
+        /* patch dxfrw_c: membri neinitializati; o imagine creata prin API sau citita fara aceste
+           coduri ajungea in fisier cu valori aleatoare */
+        ref = 0;
+        sizeu = sizev = dz = 0.0;
     }
 
 protected:
@@ -1146,7 +1231,12 @@ public:
     void setExtrusion(const DRW_Coord p) {extPoint =p;}
     std::string getName(){return name;}                   /*!< Name of the block that contains the entities, code 2 */
     void setName(const std::string s) {name = s;}
-//    int getType(){ return type;}                      /*!< Dimension type, code 70 */
+    /* patch dxfrw_c: acces fara copii temporare (pentru interfata C) si la codul 70 */
+    const std::string& getTextRef() const {return text;}
+    const std::string& getStyleRef() const {return style;}
+    const std::string& getNameRef() const {return name;}
+    int getType() const { return type;}                   /*!< Dimension type, code 70 */
+    void setType(const int t) { type = t;}
 
 protected:
     DRW_Coord getPt2() const {return clonePoint;}
@@ -1398,6 +1488,12 @@ public:
         extrusionPoint.x = extrusionPoint.y = 0.0;
         arrow = 1;
         extrusionPoint.z = 1.0;
+        /* patch dxfrw_c: membri neinitializati (scrisi apoi in fisier cu valori aleatoare) */
+        hookline = 1;
+        textheight = textwidth = 0.0;
+        coloruse = 0;
+        annotHandle = 0;
+        vertexpoint = NULL;
     }
     ~DRW_Leader() {
         while (!vertexlist.empty()) {
@@ -1436,6 +1532,177 @@ private:
     dwgHandle AnnotH;
 };
 
+/* patch dxfrw_c: MULTILEADER (indicator cu text sau bloc, din AutoCAD 2008) nu era suportat deloc.
+   Geometria este cea din datele de context (CONTEXT_DATA): bratele (LEADER) cu liniile lor
+   (LEADER_LINE), textul sau blocul de continut. Referintele la tabele (stil de text, tip de linie,
+   blocuri) se pastreaza prin nume; handle-urile sunt folosite doar la citire (DXF: aplicatia le
+   rezolva, DWG: le rezolva dwgReader). Stilul MLEADERSTYLE nu este citit: la scriere toate
+   proprietatile sunt marcate ca suprascrise (cod 90), iar entitatea trimite spre stilul "Standard". */
+
+//! A leader line of a MULTILEADER (LEADER_LINE{ ... })
+class DRW_MLeaderLine {
+public:
+    DRW_MLeaderLine() : breakIndex(0), lineIndex(0), lineType(0), color(DRW_MLeaderLine::ByBlockRaw),
+                        lineWeight(-2), arrowSize(0.0), flags(0), haveOverrides(false), lineTypeH(0), arrowH(0) {}
+    static const dint32 ByBlockRaw = static_cast<dint32>(0xC1000000);
+
+    std::vector<DRW_Coord> vertices;      /*!< vertices, code 10 (the last point is not stored: it is the leader connection) */
+    int breakIndex;                       /*!< segment index of breaks, code 90 */
+    std::vector<DRW_Coord> breakStart;    /*!< break start points, code 11 */
+    std::vector<DRW_Coord> breakEnd;      /*!< break end points, code 12 */
+    int lineIndex;                        /*!< leader line index, code 91 */
+    int lineType;                         /*!< R2010+ override: 0 invisible, 1 straight, 2 spline, code 170 */
+    dint32 color;                         /*!< raw color (0xC0... bylayer, 0xC1... byblock, 0xC2 rgb, 0xC3 aci), code 92 */
+    int lineWeight;                       /*!< code 171 */
+    double arrowSize;                     /*!< code 40 */
+    int flags;                            /*!< override flags, code 93 */
+    bool haveOverrides;                   /*!< R2010+ fields present (170, 171, 40, 93) */
+    UTF8STRING lineTypeName;              /*!< linetype of this line (code 340), empty = default */
+    UTF8STRING arrowBlock;                /*!< arrow block (code 341), empty = default */
+    duint32 lineTypeH;                    /*!< handles, only while reading */
+    duint32 arrowH;
+};
+
+//! An attribute value of the content block of a MULTILEADER (codes 330, 177, 44, 302)
+class DRW_MLeaderBlockAttr {
+public:
+    DRW_MLeaderBlockAttr() : index(0), width(0.0), attdefH(0) {}
+    UTF8STRING tag;                       /*!< tag of the ATTDEF in the content block (resolved from code 330) */
+    UTF8STRING text;                      /*!< value, code 302 */
+    int index;                            /*!< code 177 */
+    double width;                         /*!< code 44 */
+    duint32 attdefH;                      /*!< handle of the ATTDEF, only while reading */
+};
+
+//! A leader root of a MULTILEADER (LEADER{ ... })
+class DRW_MLeaderRoot {
+public:
+    DRW_MLeaderRoot() : hasLastPoint(true), hasDogleg(true), branchIndex(0), doglegLength(0.0), attachDir(0) {
+        doglegVector.x = 1.0;
+    }
+    bool hasLastPoint;                    /*!< code 290 */
+    bool hasDogleg;                       /*!< code 291 */
+    DRW_Coord lastPoint;                  /*!< connection point (end of the leader lines), code 10 */
+    DRW_Coord doglegVector;               /*!< dogleg (landing) direction, code 11 */
+    std::vector<DRW_Coord> breakStart;    /*!< code 12 */
+    std::vector<DRW_Coord> breakEnd;      /*!< code 13 */
+    int branchIndex;                      /*!< leader index, code 90 */
+    double doglegLength;                  /*!< code 40 */
+    std::vector<DRW_MLeaderLine> lines;   /*!< leader lines */
+    int attachDir;                        /*!< R2010+: 0 horizontal, 1 vertical, code 271 */
+};
+
+//! Class to handle MULTILEADER entities
+class DRW_MLeader : public DRW_Entity {
+    SETENTFRIENDS
+public:
+    DRW_MLeader();
+
+    virtual void applyExtrusion(){}
+
+protected:
+    void parseCode(int code, dxfReader *reader);
+    virtual bool parseDwg(DRW::Version version, dwgBuffer *buf, duint32 bs=0);
+
+public:
+    int classVersion;              /*!< code 270, 2 */
+    /* ---- context data (CONTEXT_DATA{ ... }) */
+    double ctxScale;               /*!< overall scale, code 40 */
+    DRW_Coord contentBase;         /*!< content base point, code 10 */
+    double ctxTextHeight;          /*!< code 41 */
+    double ctxArrowSize;           /*!< code 140 */
+    double landingGap;             /*!< code 145 */
+    int ctxTextLeft;               /*!< code 174 */
+    int ctxTextRight;              /*!< code 175 */
+    int ctxTextAngleType;          /*!< code 176 */
+    int ctxTextAlignType;          /*!< code 177 */
+    bool hasText;                  /*!< code 290 */
+    UTF8STRING text;               /*!< mtext content, code 304 */
+    DRW_Coord textNormal;          /*!< code 11 */
+    UTF8STRING textStyle;          /*!< text style of the content (code 340 in context) */
+    DRW_Coord textLocation;        /*!< code 12 */
+    DRW_Coord textDirection;       /*!< code 13 */
+    double textRotation;           /*!< radians, code 42 */
+    double textWidth;              /*!< boundary width, code 43 */
+    double textDefinedHeight;      /*!< boundary height, code 44 */
+    double lineSpacingFactor;      /*!< code 45 */
+    int lineSpacingStyle;          /*!< code 170 */
+    dint32 textColor;              /*!< raw color, code 90 */
+    int textAttachment;            /*!< code 171 (1..9) */
+    int flowDirection;             /*!< code 172 */
+    dint32 bgColor;                /*!< raw color, code 91 */
+    double bgScale;                /*!< code 141 */
+    int bgTransparency;            /*!< code 92 */
+    bool bgFill;                   /*!< code 291 */
+    bool bgMaskFill;               /*!< code 292 */
+    int columnType;                /*!< code 173 */
+    bool textHeightAuto;           /*!< code 293 */
+    double columnWidth;            /*!< code 142 */
+    double columnGutter;           /*!< code 143 */
+    bool columnFlowReversed;       /*!< code 294 */
+    std::vector<double> columnSizes; /*!< code 144 */
+    bool wordBreak;                /*!< code 295 */
+    bool hasBlock;                 /*!< code 296 */
+    UTF8STRING blockName;          /*!< content block (code 341 in context) */
+    DRW_Coord blockNormal;         /*!< code 14 */
+    DRW_Coord blockLocation;       /*!< code 15 */
+    DRW_Coord blockScale;          /*!< code 16 */
+    double blockRotation;          /*!< radians, code 46 */
+    dint32 blockColor;             /*!< raw color, code 93 */
+    double blockTransform[16];     /*!< code 47 */
+    DRW_Coord planeOrigin;         /*!< code 110 */
+    DRW_Coord planeXDir;           /*!< code 111 */
+    DRW_Coord planeYDir;           /*!< code 112 */
+    bool normalReversed;           /*!< code 297 */
+    int ctxTextTop;                /*!< R2010+, code 273 */
+    int ctxTextBottom;             /*!< R2010+, code 272 */
+    std::vector<DRW_MLeaderRoot> leaders;
+    /* ---- entity properties */
+    duint32 overrideFlags;         /*!< property override flags, code 90 */
+    int leaderType;                /*!< 0 invisible, 1 straight, 2 spline, code 170 */
+    dint32 lineColor;              /*!< raw color, code 91 */
+    UTF8STRING leaderLineType;     /*!< code 341 */
+    int leaderLineWeight;          /*!< code 171 */
+    bool landingEnabled;           /*!< code 290 */
+    bool doglegEnabled;            /*!< code 291 */
+    double landingDistance;        /*!< dogleg length, code 41 */
+    UTF8STRING arrowBlock;         /*!< arrow block, empty = closed filled, code 342 */
+    double arrowSize;              /*!< code 42 */
+    int contentType;               /*!< 0 none, 1 block, 2 mtext, 3 tolerance, code 172 */
+    UTF8STRING entTextStyle;       /*!< code 343 */
+    int textLeftAttach;            /*!< code 173 */
+    int textRightAttach;           /*!< code 95 */
+    int textAngleType;             /*!< code 174 */
+    int textAlignType;             /*!< code 175 */
+    dint32 entTextColor;           /*!< raw color, code 92 */
+    bool textFrame;                /*!< code 292 */
+    UTF8STRING entBlock;           /*!< code 344 */
+    dint32 entBlockColor;          /*!< raw color, code 93 */
+    DRW_Coord entBlockScale;       /*!< code 10 (entity level) */
+    double entBlockRotation;       /*!< radians, code 43 */
+    int blockConnection;           /*!< code 176 */
+    bool annotative;               /*!< code 293 */
+    bool textDirNegative;          /*!< code 294 */
+    int ipeAlign;                  /*!< code 178 */
+    int justification;             /*!< text attachment point, code 179 */
+    double scale;                  /*!< code 45 */
+    int textAttachDir;             /*!< R2010+, code 271 */
+    int textBottomAttach;          /*!< R2010+, code 272 */
+    int textTopAttach;             /*!< R2010+, code 273 */
+    bool extendToText;             /*!< R2013+, code 295 */
+    std::vector<DRW_MLeaderBlockAttr> blockAttribs; /*!< attribute values of the content block */
+
+public: //only for read: handles resolved by the reader or the application
+    duint32 styleH;                /*!< MLEADERSTYLE, code 340 */
+    duint32 ctxTextStyleH, ctxBlockH, lineTypeH, arrowH, entTextStyleH, entBlockH;
+
+private:
+    int section;                   /*!< dxf: 0 entity, 1 context, 2 leader, 3 leader line */
+    int transformIndex;
+    bool afterSubclass;            /*!< dxf: "100 AcDbMLeader" seen (330 is then an ATTDEF handle) */
+    int lastPointCode;             /*!< dxf: code of the last point started (for 20/30) */
+};
+
 //! Class to handle viewport entity
 /*!
 *  Class to handle viewport entity
@@ -1451,6 +1718,14 @@ public:
         psheight = 156;
         centerPX = 128.5;
         centerPY = 97.5;
+        /* patch dxfrw_c: membri neinitializati (scrisi apoi in fisier cu valori aleatoare) */
+        vpID = 0;
+        snapPX = snapPY = snapSpPX = snapSpPY = 0.0;
+        viewDir = DRW_Coord(0.0, 0.0, 1.0);
+        viewLength = 50.0;
+        frontClip = backClip = snapAngle = twistAngle = 0.0;
+        viewHeight = psheight;
+        frozenLyCount = 0;
     }
 
     virtual void applyExtrusion(){}

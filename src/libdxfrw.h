@@ -38,6 +38,8 @@ public:
      */
     bool read(DRW_Interface *interface_, bool ext);
     void setBinary(bool b) {binFile = b;}
+    /* patch dxfrw_c: dupa read(), indica daca s-a gasit marcajul EOF (false = fisier trunchiat) */
+    bool eofFound() const { return foundEof; }
 
     bool write(DRW_Interface *interface_, DRW::Version ver, bool bin);
     bool writeLineType(DRW_LType *ent);
@@ -61,7 +63,13 @@ public:
     bool writeSpline(DRW_Spline *ent);
     bool writeBlockRecord(std::string name);
     bool writeBlock(DRW_Block *ent);
-    bool writeInsert(DRW_Insert *ent);
+    bool writeInsert(DRW_Insert *ent);  /* patch dxfrw_c: cu atribute, isi scrie singura XDATA */
+    bool writeAttdef(DRW_Attdef *ent);  /* patch dxfrw_c */
+    /* patch dxfrw_c: MULTILEADER exista din DXF 2007; la versiuni mai vechi nu se scrie (intoarce false).
+       Aplicatia anunta inainte de write() daca desenul are MULTILEADER, pentru ca in CLASSES si OBJECTS
+       sa fie scrise clasa si stilul "Standard" (MLEADERSTYLE) spre care trimit entitatile. */
+    bool writeMLeader(DRW_MLeader *ent);
+    void setHaveMLeaders(bool b) { haveMLeaders = b; }
     bool writeMText(DRW_MText *ent);
     bool writeText(DRW_Text *ent);
     bool writeHatch(DRW_Hatch *ent);
@@ -70,6 +78,9 @@ public:
     bool writeLeader(DRW_Leader *ent);
     bool writeDimension(DRW_Dimension *ent);
     void setEllipseParts(int parts){elParts = parts;} /*!< set parts munber when convert ellipse to polyline */
+    /* patch dxfrw_c: datele extinse (XDATA) ale entitatilor erau citite din DXF, dar nu erau scrise.
+       Se apeleaza imediat dupa functia write* a entitatii (POLYLINE isi scrie singura XDATA). */
+    bool writeEntityExtData(DRW_Entity *ent) { return ent->extData.empty() ? true : writeExtData(ent->extData); }
 
 private:
     /// used by read() to parse the content of the file
@@ -111,9 +122,12 @@ private:
     bool processImageDef();
     bool processDimension();
     bool processLeader();
+    bool processAttdef(); /* patch dxfrw_c */
+    bool processMLeader(); /* patch dxfrw_c */
 
 //    bool writeHeader();
-    bool writeEntity(DRW_Entity *ent);
+    bool writeEntity(DRW_Entity *ent, duint32 owner = 0);
+    bool writeAttribute(DRW_Attrib *ent, duint32 owner); /* patch dxfrw_c: ATTRIB si ATTDEF */
     bool writeTables();
     bool writeBlocks();
     bool writeObjects();
@@ -136,10 +150,19 @@ private:
     bool wlayer0;
     bool dimstyleStd;
     bool applyExt;
+    bool foundEof; /* patch dxfrw_c */
     bool writingBlock;
     int elParts;  /*!< parts munber when convert ellipse to polyline */
     std::map<std::string,int> blockMap;
     std::vector<DRW_ImageDef*> imageDef;  /*!< imageDef list */
+    /* patch dxfrw_c: handle-urile scrise, pentru referintele din MULTILEADER (chei: nume cu majuscule) */
+    std::map<std::string, std::string> styleHandleMap;
+    std::map<std::string, std::string> ltypeHandleMap;
+    std::map<std::string, std::string> attdefHandleMap;  /* "BLOC\nETICHETA" */
+    std::string currentBlock;
+    bool haveMLeaders;
+    std::string blockHandleOf(const std::string& name);
+    std::string tableHandleOf(const std::map<std::string, std::string>& m, const std::string& name);
 
     int currHandle;
 

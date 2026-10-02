@@ -23,25 +23,26 @@ OUTPUT_FILE="dxfrw.tar.gz"
 # Start timer
 START_TIME=$(date +%s)
 
-# Step 1: Generate configure script
+# Step 1: Configure build (CMake)
 echo ""
-echo "[1/6] Generating configure script..."
-autoreconf -vfi
+echo "[1/6] Configuring build..."
+rm -rf build-docker
+cmake -S . -B build-docker -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="${PREFIX}"
 
-# Step 2: Configure build
+# Step 2: Build library and tools
 echo ""
-echo "[2/6] Configuring build..."
-./configure --prefix="${PREFIX}"
+echo "[2/6] Building library..."
+cmake --build build-docker -j"$(nproc)"
 
-# Step 3: Build library
+# Step 3: Run unit tests
 echo ""
-echo "[3/6] Building library..."
-make -j$(nproc)
+echo "[3/6] Running tests..."
+ctest --test-dir build-docker --output-on-failure
 
 # Step 4: Install to prefix
 echo ""
 echo "[4/6] Installing to ${PREFIX}..."
-make install
+cmake --install build-docker
 
 # Step 5: Copy additional binaries if they exist
 echo ""
@@ -84,4 +85,4 @@ echo ""
 # Clean up build artifacts
 echo "Cleaning up build artifacts..."
 cd /work
-make clean 2>/dev/null || true
+rm -rf build-docker

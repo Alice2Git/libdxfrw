@@ -10,9 +10,7 @@ LABEL description="Build environment for libdxfrw on Alpine Linux (musl-based)"
 # Note: Alpine uses musl libc instead of glibc
 RUN apk add --no-cache \
     build-base \
-    autoconf \
-    automake \
-    libtool \
+    cmake \
     pkgconfig \
     bash \
     tar \

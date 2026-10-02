@@ -10,6 +10,7 @@
 **  along with this program.  If not, see <http://www.gnu.org/licenses/>.    **
 ******************************************************************************/
 
+#include <algorithm> /* patch dxfrw_c */
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
@@ -53,6 +54,39 @@ void dwgReader::parseAttribs(DRW_Entity* e){
         std::map<duint32, DRW_Layer*>::iterator ly_it = layermap.find(lyref);
         if (ly_it != layermap.end()){
             e->layer = (ly_it->second)->name;
+        }
+        /* patch dxfrw_c: in XDATA citit din DWG, numele aplicatiei (1001) si numele layerului (1003)
+           sunt handle-uri; se inlocuiesc cu numele din tabele. Un grup al carui APPID nu exista se
+           elimina (nu poate fi scris corect in DXF), la fel o referinta la un layer inexistent. */
+        if (!e->extData.empty()) {
+            std::vector<DRW_Variant*> kept;
+            bool dropGroup = false;
+            for (std::vector<DRW_Variant*>::iterator it = e->extData.begin(); it != e->extData.end(); ++it) {
+                DRW_Variant *v = *it;
+                if (v->code() == 1001) {
+                    dropGroup = false;
+                    if (v->type() == DRW_Variant::INTEGER) {
+                        std::map<duint32, DRW_AppId*>::iterator ap = appIdmap.find(static_cast<duint32>(v->content.i));
+                        if (ap == appIdmap.end() || ap->second->name.empty())
+                            dropGroup = true;
+                        else
+                            v->addString(1001, ap->second->name);
+                    }
+                } else if (v->code() == 1003 && v->type() == DRW_Variant::INTEGER) {
+                    std::string name = findTableName(DRW::LAYER, v->content.i);
+                    if (name.empty()) {
+                        delete v;
+                        continue;
+                    }
+                    v->addString(1003, name);
+                }
+                if (dropGroup) {
+                    delete v;
+                    continue;
+                }
+                kept.push_back(v);
+            }
+            e->extData.swap(kept);
         }
     }
 }
@@ -135,11 +169,22 @@ bool dwgReader::readDwgHandles(dwgBuffer *dbuf, duint32 offset, duint32 size) {
     while (maxPos > dbuf->getPosition()) {
         DRW_DBG("\nstart handles section buf->curPosition()= "); DRW_DBG(dbuf->getPosition()); DRW_DBG("\n");
         duint16 size = dbuf->getBERawShort16();
+        /* patch dxfrw_c: o inregistrare care nu incape in sectiune inseamna sfarsitul datelor utile
+           (altfel se citea dupa limita si toata harta era declarata invalida) */
+        if (size < 2 || static_cast<duint64>(startPos) + size + 2 > maxPos)
+            break;
         DRW_DBG("object map section size= "); DRW_DBG(size); DRW_DBG("\n");
         dbuf->setPosition(startPos);
-        duint8 *tmpByteStr = new duint8[size];
+        duint8 *tmpByteStr = new duint8[size]();
         dbuf->getBytes(tmpByteStr, size);
         dwgBuffer buff(tmpByteStr, size, &decoder);
+        /* patch dxfrw_c: o inregistrare goala (doar suma de control) marcheaza sfarsitul hartii de obiecte.
+           Biblioteca o sarea si continua, interpretand ca date rezidurile unei salvari anterioare; perechile
+           rezultate suprascriau pozitiile reale ale obiectelor, iar tabelele nu mai erau gasite (fisiere goale). */
+        if (size == 2) {
+            delete[] tmpByteStr;
+            break;
+        }
         if (size != 2){
             buff.setPosition(2);
             int lastHandle = 0;
@@ -160,11 +205,17 @@ bool dwgReader::readDwgHandles(dwgBuffer *dbuf, duint32 offset, duint32 size) {
         DRW_DBG("object map section crc8 read= "); DRW_DBG(crcRead);
         DRW_DBG("\nobject map section crc8 calculated= "); DRW_DBG(crcCalc);
         DRW_DBG("\nobject section buf->curPosition()= "); DRW_DBG(dbuf->getPosition()); DRW_DBG("\n");
+        /* patch dxfrw_c: suma de control era calculata, dar niciodata comparata. Fara aceasta verificare,
+           zona de umplutura de la sfarsitul sectiunii era interpretata ca inregistrari valide, iar perechile
+           rezultate suprascriau pozitiile reale ale obiectelor (tabelele nu mai erau gasite). */
+        if (crcCalc != crcRead)
+            break;
         startPos = dbuf->getPosition();
     }
 
-    bool ret = dbuf->isGood();
-    return ret;
+    /* patch dxfrw_c: rezultatul se judeca dupa continutul citit, nu dupa steagul bufferului, care
+       ramane pe "eroare" dupa orice citire la limita, chiar daca harta a fost citita integral */
+    return !ObjectMap.empty();
 }
 
 /*********** objects ************************/
@@ -198,7 +249,7 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             bs = dbuf->getUModularChar();
         else
             bs = 0;
-        tmpByteStr = new duint8[csize];
+        tmpByteStr = new duint8[csize]();
         dbuf->getBytes(tmpByteStr, csize);
         dwgBuffer cbuff(tmpByteStr, csize, &decoder);
         //verify if object are correct
@@ -218,7 +269,8 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             mit = ObjectMap.find(*it);
             if (mit==ObjectMap.end()) {
                 DRW_DBG("\nWARNING: LineType not found\n");
-                ret = false;
+                /* patch dxfrw_c: o intrare la care tabelul trimite, dar care nu mai exista in desen
+                   (element sters), nu este o eroare de citire: se sare peste ea */
             } else {
                 oc = mit->second;
                 ObjectMap.erase(mit);
@@ -231,10 +283,12 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
                     bs = dbuf->getUModularChar();
                 else
                     bs = 0;
-                tmpByteStr = new duint8[lsize];
+                tmpByteStr = new duint8[lsize]();
                 dbuf->getBytes(tmpByteStr, lsize);
                 dwgBuffer lbuff(tmpByteStr, lsize, &decoder);
                 ret2 = lt->parseDwg(version, &lbuff, bs);
+                if (ltypemap.count(lt->handle)) /* patch dxfrw_c: handle duplicat in fisier corupt */
+                    delete ltypemap[lt->handle];
                 ltypemap[lt->handle] = lt;
                 if(ret)
                     ret = ret2;
@@ -259,7 +313,7 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             bs = dbuf->getUModularChar();
         else
             bs = 0;
-        tmpByteStr = new duint8[size];
+        tmpByteStr = new duint8[size]();
         dbuf->getBytes(tmpByteStr, size);
         dwgBuffer buff(tmpByteStr, size, &decoder);
         //verify if object are correct
@@ -279,7 +333,8 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             mit = ObjectMap.find(*it);
             if (mit==ObjectMap.end()) {
                 DRW_DBG("\nWARNING: Layer not found\n");
-                ret = false;
+                /* patch dxfrw_c: o intrare la care tabelul trimite, dar care nu mai exista in desen
+                   (element sters), nu este o eroare de citire: se sare peste ea */
             } else {
                 oc = mit->second;
                 ObjectMap.erase(mit);
@@ -291,10 +346,12 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
                     bs = dbuf->getUModularChar();
                 else
                     bs = 0;
-                tmpByteStr = new duint8[size];
+                tmpByteStr = new duint8[size]();
                 dbuf->getBytes(tmpByteStr, size);
                 dwgBuffer buff(tmpByteStr, size, &decoder);
                 ret2 = la->parseDwg(version, &buff, bs);
+                if (layermap.count(la->handle)) /* patch dxfrw_c: handle duplicat in fisier corupt */
+                    delete layermap[la->handle];
                 layermap[la->handle] = la;
                 if(ret)
                     ret = ret2;
@@ -329,7 +386,7 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             bs = dbuf->getUModularChar();
         else
             bs = 0;
-        tmpByteStr = new duint8[size];
+        tmpByteStr = new duint8[size]();
         dbuf->getBytes(tmpByteStr, size);
         dwgBuffer buff(tmpByteStr, size, &decoder);
         //verify if object are correct
@@ -349,7 +406,8 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             mit = ObjectMap.find(*it);
             if (mit==ObjectMap.end()) {
                 DRW_DBG("\nWARNING: Style not found\n");
-                ret = false;
+                /* patch dxfrw_c: o intrare la care tabelul trimite, dar care nu mai exista in desen
+                   (element sters), nu este o eroare de citire: se sare peste ea */
             } else {
                 oc = mit->second;
                 ObjectMap.erase(mit);
@@ -361,10 +419,12 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
                     bs = dbuf->getUModularChar();
                 else
                     bs = 0;
-                tmpByteStr = new duint8[size];
+                tmpByteStr = new duint8[size]();
                 dbuf->getBytes(tmpByteStr, size);
                 dwgBuffer buff(tmpByteStr, size, &decoder);
                 ret2 = sty->parseDwg(version, &buff, bs);
+                if (stylemap.count(sty->handle)) /* patch dxfrw_c: handle duplicat in fisier corupt */
+                    delete stylemap[sty->handle];
                 stylemap[sty->handle] = sty;
                 if(ret)
                     ret = ret2;
@@ -389,7 +449,7 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             bs = dbuf->getUModularChar();
         else
             bs = 0;
-        tmpByteStr = new duint8[size];
+        tmpByteStr = new duint8[size]();
         dbuf->getBytes(tmpByteStr, size);
         dwgBuffer buff(tmpByteStr, size, &decoder);
         //verify if object are correct
@@ -409,7 +469,8 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             mit = ObjectMap.find(*it);
             if (mit==ObjectMap.end()) {
                 DRW_DBG("\nWARNING: Dimension Style not found\n");
-                ret = false;
+                /* patch dxfrw_c: o intrare la care tabelul trimite, dar care nu mai exista in desen
+                   (element sters), nu este o eroare de citire: se sare peste ea */
             } else {
                 oc = mit->second;
                 ObjectMap.erase(mit);
@@ -421,10 +482,12 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
                     bs = dbuf->getUModularChar();
                 else
                     bs = 0;
-                tmpByteStr = new duint8[size];
+                tmpByteStr = new duint8[size]();
                 dbuf->getBytes(tmpByteStr, size);
                 dwgBuffer buff(tmpByteStr, size, &decoder);
                 ret2 = sty->parseDwg(version, &buff, bs);
+                if (dimstylemap.count(sty->handle)) /* patch dxfrw_c: handle duplicat in fisier corupt */
+                    delete dimstylemap[sty->handle];
                 dimstylemap[sty->handle] = sty;
                 if(ret)
                     ret = ret2;
@@ -449,7 +512,7 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             bs = dbuf->getUModularChar();
         else
             bs = 0;
-        tmpByteStr = new duint8[size];
+        tmpByteStr = new duint8[size]();
         dbuf->getBytes(tmpByteStr, size);
         dwgBuffer buff(tmpByteStr, size, &decoder);
         //verify if object are correct
@@ -469,7 +532,8 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             mit = ObjectMap.find(*it);
             if (mit==ObjectMap.end()) {
                 DRW_DBG("\nWARNING: vport not found\n");
-                ret = false;
+                /* patch dxfrw_c: o intrare la care tabelul trimite, dar care nu mai exista in desen
+                   (element sters), nu este o eroare de citire: se sare peste ea */
             } else {
                 oc = mit->second;
                 ObjectMap.erase(mit);
@@ -481,10 +545,12 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
                     bs = dbuf->getUModularChar();
                 else
                     bs = 0;
-                tmpByteStr = new duint8[size];
+                tmpByteStr = new duint8[size]();
                 dbuf->getBytes(tmpByteStr, size);
                 dwgBuffer buff(tmpByteStr, size, &decoder);
                 ret2 = vp->parseDwg(version, &buff, bs);
+                if (vportmap.count(vp->handle)) /* patch dxfrw_c: handle duplicat in fisier corupt */
+                    delete vportmap[vp->handle];
                 vportmap[vp->handle] = vp;
                 if(ret)
                     ret = ret2;
@@ -509,7 +575,7 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             bs = dbuf->getUModularChar();
         else
             bs = 0;
-        tmpByteStr = new duint8[csize];
+        tmpByteStr = new duint8[csize]();
         dbuf->getBytes(tmpByteStr, csize);
         dwgBuffer buff(tmpByteStr, csize, &decoder);
         //verify if object are correct
@@ -529,7 +595,8 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             mit = ObjectMap.find(*it);
             if (mit==ObjectMap.end()) {
                 DRW_DBG("\nWARNING: block record not found\n");
-                ret = false;
+                /* patch dxfrw_c: o intrare la care tabelul trimite, dar care nu mai exista in desen
+                   (element sters), nu este o eroare de citire: se sare peste ea */
             } else {
                 oc = mit->second;
                 ObjectMap.erase(mit);
@@ -541,10 +608,12 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
                     bs = dbuf->getUModularChar();
                 else
                     bs = 0;
-                tmpByteStr = new duint8[size];
+                tmpByteStr = new duint8[size]();
                 dbuf->getBytes(tmpByteStr, size);
                 dwgBuffer buff(tmpByteStr, size, &decoder);
                 ret2 = br->parseDwg(version, &buff, bs);
+                if (blockRecordmap.count(br->handle)) /* patch dxfrw_c: handle duplicat in fisier corupt */
+                    delete blockRecordmap[br->handle];
                 blockRecordmap[br->handle] = br;
                 if(ret)
                     ret = ret2;
@@ -570,7 +639,7 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             bs = dbuf->getUModularChar();
         else
             bs = 0;
-        tmpByteStr = new duint8[size];
+        tmpByteStr = new duint8[size]();
         dbuf->getBytes(tmpByteStr, size);
         dwgBuffer buff(tmpByteStr, size, &decoder);
         //verify if object are correct
@@ -590,7 +659,8 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
             mit = ObjectMap.find(*it);
             if (mit==ObjectMap.end()) {
                 DRW_DBG("\nWARNING: AppId not found\n");
-                ret = false;
+                /* patch dxfrw_c: o intrare la care tabelul trimite, dar care nu mai exista in desen
+                   (element sters), nu este o eroare de citire: se sare peste ea */
             } else {
                 oc = mit->second;
                 ObjectMap.erase(mit);
@@ -602,10 +672,12 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
                     bs = dbuf->getUModularChar();
                 else
                     bs = 0;
-                tmpByteStr = new duint8[size];
+                tmpByteStr = new duint8[size]();
                 dbuf->getBytes(tmpByteStr, size);
                 dwgBuffer buff(tmpByteStr, size, &decoder);
                 ret2 = ai->parseDwg(version, &buff, bs);
+                if (appIdmap.count(ai->handle)) /* patch dxfrw_c: handle duplicat in fisier corupt */
+                    delete appIdmap[ai->handle];
                 appIdmap[ai->handle] = ai;
                 if(ret)
                     ret = ret2;
@@ -632,7 +704,7 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
                 bs = dbuf->getUModularChar();
             else
                 bs = 0;
-            tmpByteStr = new duint8[size];
+            tmpByteStr = new duint8[size]();
             dbuf->getBytes(tmpByteStr, size);
             dwgBuffer buff(tmpByteStr, size, &decoder);
             //verify if object are correct
@@ -666,7 +738,7 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
                 bs = dbuf->getUModularChar();
             else
                 bs = 0;
-            tmpByteStr = new duint8[size];
+            tmpByteStr = new duint8[size]();
             dbuf->getBytes(tmpByteStr, size);
             dwgBuffer buff(tmpByteStr, size, &decoder);
             //verify if object are correct
@@ -701,7 +773,7 @@ bool dwgReader::readDwgTables(DRW_Header& hdr, dwgBuffer *dbuf) {
                     bs = dbuf->getUModularChar();
                 else
                     bs = 0;
-                tmpByteStr = new duint8[size];
+                tmpByteStr = new duint8[size]();
                 dbuf->getBytes(tmpByteStr, size);
                 dwgBuffer buff(tmpByteStr, size, &decoder);
                 //verify if object are correct
@@ -732,6 +804,70 @@ bool dwgReader::readDwgBlocks(DRW_Interface& intfa, dwgBuffer *dbuf){
     std::map<duint32, objHandle>::iterator mit;
     DRW_DBG("\nobject map total size= "); DRW_DBG(ObjectMap.size());
 
+    /* patch dxfrw_c: inregistrarea unui bloc anonim are in DWG doar prefixul ("*D", "*U"), iar numele
+       complet ("*D834") este in entitatea BLOCK. Numele era actualizat abia cand se ajungea la blocul
+       respectiv, deci cotele si INSERT-urile din blocurile citite inainte primeau numele incomplet si
+       trimiteau spre un bloc inexistent (cote fara geometrie, insertii pierdute). Se citesc intai numele
+       tuturor blocurilor, apoi entitatile. */
+    for (std::map<duint32, DRW_Block_Record*>::iterator it=blockRecordmap.begin(); it != blockRecordmap.end(); ++it){
+        DRW_Block_Record* bkr= it->second;
+        mit = ObjectMap.find(bkr->block);
+        if (mit == ObjectMap.end() || !dbuf->setPosition(mit->second.loc))
+            continue;
+        int size = dbuf->getModularShort();
+        if (version > DRW::AC1021) //2010+
+            bs = dbuf->getUModularChar();
+        else
+            bs = 0;
+        if (size <= 0 || size > dbuf->numRemainingBytes())
+            continue;
+        tmpByteStr = new duint8[size]();
+        dbuf->getBytes(tmpByteStr, size);
+        dwgBuffer buff(tmpByteStr, size, &decoder);
+        DRW_Block bk;
+        if (bk.parseDwg(version, &buff, bs) && !bk.name.empty())
+            bkr->name = bk.name;
+        delete[]tmpByteStr;
+    }
+    /* patch dxfrw_c: un DWG poate contine doua blocuri anonime distincte cu acelasi nume (de ex. "*D841"
+       de doua ori); in DWG referintele sunt prin handle, dar in DXF prin nume, deci al doilea ar fi
+       scris peste primul (handle-uri duplicate, cote cu geometria gresita). Blocurile anonime cu nume
+       deja folosit primesc urmatorul numar liber cu acelasi prefix, inainte de rezolvarea referintelor. */
+    {
+        std::map<std::string, bool> used;
+        std::map<std::string, int> maxNum;   /* cel mai mare numar folosit pentru fiecare prefix ("*D") */
+        for (std::map<duint32, DRW_Block_Record*>::iterator it=blockRecordmap.begin(); it != blockRecordmap.end(); ++it){
+            std::string up = it->second->name;
+            std::transform(up.begin(), up.end(), up.begin(), ::toupper);
+            used[up] = true;
+            if (up.size() > 2 && up[0] == '*' && up.find_first_not_of("0123456789", 2) == std::string::npos) {
+                int n = std::atoi(up.c_str() + 2);
+                std::string prefix = up.substr(0, 2);
+                if (n > maxNum[prefix]) maxNum[prefix] = n;
+            }
+        }
+        std::map<std::string, bool> seen;
+        for (std::map<duint32, DRW_Block_Record*>::iterator it=blockRecordmap.begin(); it != blockRecordmap.end(); ++it){
+            DRW_Block_Record* bkr = it->second;
+            std::string up = bkr->name;
+            std::transform(up.begin(), up.end(), up.begin(), ::toupper);
+            if (seen[up] && up.size() > 1 && up[0] == '*' && up.compare(0, 6, "*PAPER") != 0 && up.compare(0, 6, "*MODEL") != 0) {
+                std::string prefix = bkr->name.substr(0, 2);
+                std::string fresh;
+                do {
+                    std::ostringstream os;
+                    os << prefix << ++maxNum[up.substr(0, 2)];
+                    fresh = os.str();
+                    up = fresh;
+                    std::transform(up.begin(), up.end(), up.begin(), ::toupper);
+                } while (used[up]);
+                used[up] = true;
+                bkr->name = fresh;
+            }
+            seen[up] = true;
+        }
+    }
+
     for (std::map<duint32, DRW_Block_Record*>::iterator it=blockRecordmap.begin(); it != blockRecordmap.end(); ++it){
         DRW_Block_Record* bkr= it->second;
         DRW_DBG("\nParsing Block, record handle= "); DRW_DBGH(it->first); DRW_DBG(" Name= "); DRW_DBG(bkr->name); DRW_DBG("\n");
@@ -755,7 +891,7 @@ bool dwgReader::readDwgBlocks(DRW_Interface& intfa, dwgBuffer *dbuf){
             bs = dbuf->getUModularChar();
         else
             bs = 0;
-        tmpByteStr = new duint8[size];
+        tmpByteStr = new duint8[size]();
         dbuf->getBytes(tmpByteStr, size);
         dwgBuffer buff(tmpByteStr, size, &decoder);
         DRW_Block bk;
@@ -766,6 +902,9 @@ bool dwgReader::readDwgBlocks(DRW_Interface& intfa, dwgBuffer *dbuf){
         //complete block entity with block record data
         bk.basePoint = bkr->basePoint;
         bk.flags = bkr->flags;
+        /* patch dxfrw_c: numele stabilit la inceput (complet si unic) are prioritate */
+        if (!bkr->name.empty())
+            bk.name = bkr->name;
         intfa.addBlock(bk);
         //and update block record name
         bkr->name = bk.name;
@@ -790,6 +929,7 @@ bool dwgReader::readDwgBlocks(DRW_Interface& intfa, dwgBuffer *dbuf){
                         oc = mit->second;
                         ObjectMap.erase(mit);
                         ret2 = readDwgEntity(dbuf, oc, intfa);
+                        if (!ret2) ++failedObjects;   /* patch dxfrw_c */
                         ret = ret && ret2;
                     }
                     if (nextH == bkr->lastEH)
@@ -810,6 +950,7 @@ bool dwgReader::readDwgBlocks(DRW_Interface& intfa, dwgBuffer *dbuf){
                         ObjectMap.erase(mit);
                         DRW_DBG("\nBlocks, parsing entity: "); DRW_DBGH(oc.handle); DRW_DBG(", pos: "); DRW_DBG(oc.loc); DRW_DBG("\n");
                         ret2 = readDwgEntity(dbuf, oc, intfa);
+                        if (!ret2) ++failedObjects;   /* patch dxfrw_c */
                         ret = ret && ret2;
                     }
                 }
@@ -832,7 +973,7 @@ bool dwgReader::readDwgBlocks(DRW_Interface& intfa, dwgBuffer *dbuf){
             bs = dbuf->getUModularChar();
         else
             bs = 0;
-        tmpByteStr = new duint8[size];
+        tmpByteStr = new duint8[size]();
         dbuf->getBytes(tmpByteStr, size);
         dwgBuffer buff1(tmpByteStr, size, &decoder);
         DRW_Block end;
@@ -874,7 +1015,7 @@ bool dwgReader::readPlineVertex(DRW_Polyline& pline, dwgBuffer *dbuf){
                 if (version > DRW::AC1021) {//2010+
                     bs = dbuf->getUModularChar();
                 }
-                duint8 *tmpByteStr = new duint8[size];
+                duint8 *tmpByteStr = new duint8[size]();
                 dbuf->getBytes(tmpByteStr, size);
                 dwgBuffer buff(tmpByteStr, size, &decoder);
                 dint16 oType = buff.getObjType(version);
@@ -911,7 +1052,7 @@ bool dwgReader::readPlineVertex(DRW_Polyline& pline, dwgBuffer *dbuf){
                 if (version > DRW::AC1021) {//2010+
                     bs = dbuf->getUModularChar();
                 }
-                duint8 *tmpByteStr = new duint8[size];
+                duint8 *tmpByteStr = new duint8[size]();
                 dbuf->getBytes(tmpByteStr, size);
                 dwgBuffer buff(tmpByteStr, size, &decoder);
                 dint16 oType = buff.getObjType(version);
@@ -932,6 +1073,75 @@ bool dwgReader::readPlineVertex(DRW_Polyline& pline, dwgBuffer *dbuf){
     return ret;
 }
 
+/* patch dxfrw_c: citeste atributele (ATTRIB) unei insertii, dupa handle-urile retinute de
+   DRW_Insert::parseDwg (pana la R2000 o lista inlantuita intre primul si ultimul atribut, din R2004 lista
+   completa), le ataseaza insertiei si scoate din harta obiectele citite si SEQEND-ul. Un atribut deja
+   mutat in lista obiectelor necitite (handle mai mic decat al insertiei) este cautat si acolo. */
+bool dwgReader::readInsertAttribs(DRW_Insert& ins, dwgBuffer *dbuf){
+    bool ret = true;
+    duint32 savedNext = nextEntLink, savedPrev = prevEntLink;
+    std::vector<duint32> handles = ins.attribHandles;
+    bool linked = (version < DRW::AC1018);
+    duint32 nextH = linked ? ins.firstAttribH : 0;
+    size_t idx = 0;
+    size_t guard = 0;
+    while (guard++ < 100000) {
+        duint32 h;
+        if (linked) {
+            if (nextH == 0) break;
+            h = nextH;
+        } else {
+            if (idx >= handles.size()) break;
+            h = handles[idx++];
+        }
+        objHandle oc;
+        std::map<duint32, objHandle>::iterator mit = ObjectMap.find(h);
+        if (mit != ObjectMap.end()) {
+            oc = mit->second;
+            ObjectMap.erase(mit);
+        } else {
+            mit = objObjectMap.find(h);
+            if (mit == objObjectMap.end()) {
+                ret = false;
+                if (linked) break;
+                continue;
+            }
+            oc = mit->second;
+            objObjectMap.erase(mit);
+        }
+        if (!dbuf->setPosition(oc.loc)) { ret = false; break; }
+        int size = dbuf->getModularShort();
+        duint32 bs = 0;
+        if (version > DRW::AC1021) //2010+
+            bs = dbuf->getUModularChar();
+        if (size <= 0 || size > dbuf->numRemainingBytes()) { ret = false; break; }
+        duint8 *tmpByteStr = new duint8[size]();
+        dbuf->getBytes(tmpByteStr, size);
+        dwgBuffer buff(tmpByteStr, size, &decoder);
+        DRW_Attrib a;
+        bool ok = a.parseDwg(version, &buff, bs);
+        delete[]tmpByteStr;
+        duint32 linkNext = a.nextEntLink;
+        if (ok) {
+            parseAttribs(&a);
+            a.style = findTableName(DRW::STYLE, a.styleH.ref);
+            ins.attributes.push_back(a);
+        } else {
+            ++failedObjects;
+            ret = false;
+        }
+        if (linked) {
+            if (h == ins.lastAttribH) break;
+            nextH = linkNext;
+        }
+    }
+    ObjectMap.erase(ins.seqendH.ref);
+    objObjectMap.erase(ins.seqendH.ref);
+    nextEntLink = savedNext;
+    prevEntLink = savedPrev;
+    return ret;
+}
+
 bool dwgReader::readDwgEntities(DRW_Interface& intfa, dwgBuffer *dbuf){
     bool ret = true;
     bool ret2 = true;
@@ -941,6 +1151,7 @@ bool dwgReader::readDwgEntities(DRW_Interface& intfa, dwgBuffer *dbuf){
     std::map<duint32, objHandle>::iterator itE=ObjectMap.end();
     while (itB != itE){
         ret2 = readDwgEntity(dbuf, itB->second, intfa);
+        if (!ret2) ++failedObjects;   /* patch dxfrw_c */
         ObjectMap.erase(itB);
         itB=ObjectMap.begin();
         if (ret)
@@ -973,7 +1184,7 @@ bool dwgReader::readDwgEntity(dwgBuffer *dbuf, objHandle& obj, DRW_Interface& in
         if (version > DRW::AC1021) {//2010+
             bs = dbuf->getUModularChar();
         }
-        duint8 *tmpByteStr = new duint8[size];
+        duint8 *tmpByteStr = new duint8[size]();
         dbuf->getBytes(tmpByteStr, size);
         //verify if getBytes is ok:
         if (!dbuf->isGood()){
@@ -1030,7 +1241,40 @@ bool dwgReader::readDwgEntity(dwgBuffer *dbuf, objHandle& obj, DRW_Interface& in
             DRW_Insert e;
             ENTRY_PARSE(e)
             e.name = findTableName(DRW::BLOCK_RECORD, e.blockRecH.ref);//RLZ: find as block or blockrecord (ps & ps0)
+            if (ret && e.hasAttribs)
+                readInsertAttribs(e, dbuf); /* patch dxfrw_c */
             intfa.addInsert(e);
+            break; }
+        case 103: { /* patch dxfrw_c: MULTILEADER (clasa, vezi DRW_Class::toDwgType) */
+            DRW_MLeader e;
+            ENTRY_PARSE(e)
+            if (ret) {
+                e.textStyle = findTableName(DRW::STYLE, e.ctxTextStyleH);
+                e.entTextStyle = findTableName(DRW::STYLE, e.entTextStyleH);
+                e.leaderLineType = findTableName(DRW::LTYPE, e.lineTypeH);
+                e.arrowBlock = findTableName(DRW::BLOCK_RECORD, e.arrowH);
+                e.blockName = findTableName(DRW::BLOCK_RECORD, e.ctxBlockH);
+                e.entBlock = findTableName(DRW::BLOCK_RECORD, e.entBlockH);
+                for (size_t i = 0; i < e.leaders.size(); ++i)
+                    for (size_t j = 0; j < e.leaders[i].lines.size(); ++j) {
+                        DRW_MLeaderLine &l = e.leaders[i].lines[j];
+                        l.lineTypeName = findTableName(DRW::LTYPE, l.lineTypeH);
+                        l.arrowBlock = findTableName(DRW::BLOCK_RECORD, l.arrowH);
+                    }
+                for (size_t i = 0; i < e.blockAttribs.size(); ++i) {
+                    std::map<duint32, std::string>::iterator at = attdefTags.find(e.blockAttribs[i].attdefH);
+                    if (at != attdefTags.end())
+                        e.blockAttribs[i].tag = at->second;
+                }
+                intfa.addMLeader(&e);
+            }
+            break; }
+        case 3: { /* patch dxfrw_c: ATTDEF */
+            DRW_Attdef e;
+            ENTRY_PARSE(e)
+            e.style = findTableName(DRW::STYLE, e.styleH.ref);
+            attdefTags[e.handle] = e.tag;   /* pentru atributele blocurilor din MULTILEADER */
+            intfa.addAttdef(e);
             break; }
         case 77: {
             DRW_LWPolyline e;
@@ -1058,42 +1302,56 @@ bool dwgReader::readDwgEntity(dwgBuffer *dbuf, objHandle& obj, DRW_Interface& in
             DRW_DimOrdinate e;
             ENTRY_PARSE(e)
             e.style = findTableName(DRW::DIMSTYLE, e.dimStyleH.ref);
+            /* patch dxfrw_c: blocul de geometrie al cotei era citit ca handle, dar niciodata rezolvat in nume */
+            e.name = findTableName(DRW::BLOCK_RECORD, e.blockH.ref);
             intfa.addDimOrdinate(&e);
             break; }
         case 21: {
             DRW_DimLinear e;
             ENTRY_PARSE(e)
             e.style = findTableName(DRW::DIMSTYLE, e.dimStyleH.ref);
+            /* patch dxfrw_c: blocul de geometrie al cotei era citit ca handle, dar niciodata rezolvat in nume */
+            e.name = findTableName(DRW::BLOCK_RECORD, e.blockH.ref);
             intfa.addDimLinear(&e);
             break; }
         case 22: {
             DRW_DimAligned e;
             ENTRY_PARSE(e)
             e.style = findTableName(DRW::DIMSTYLE, e.dimStyleH.ref);
+            /* patch dxfrw_c: blocul de geometrie al cotei era citit ca handle, dar niciodata rezolvat in nume */
+            e.name = findTableName(DRW::BLOCK_RECORD, e.blockH.ref);
             intfa.addDimAlign(&e);
             break; }
         case 23: {
             DRW_DimAngular3p e;
             ENTRY_PARSE(e)
             e.style = findTableName(DRW::DIMSTYLE, e.dimStyleH.ref);
+            /* patch dxfrw_c: blocul de geometrie al cotei era citit ca handle, dar niciodata rezolvat in nume */
+            e.name = findTableName(DRW::BLOCK_RECORD, e.blockH.ref);
             intfa.addDimAngular3P(&e);
             break; }
         case 24: {
             DRW_DimAngular e;
             ENTRY_PARSE(e)
             e.style = findTableName(DRW::DIMSTYLE, e.dimStyleH.ref);
+            /* patch dxfrw_c: blocul de geometrie al cotei era citit ca handle, dar niciodata rezolvat in nume */
+            e.name = findTableName(DRW::BLOCK_RECORD, e.blockH.ref);
             intfa.addDimAngular(&e);
             break; }
         case 25: {
             DRW_DimRadial e;
             ENTRY_PARSE(e)
             e.style = findTableName(DRW::DIMSTYLE, e.dimStyleH.ref);
+            /* patch dxfrw_c: blocul de geometrie al cotei era citit ca handle, dar niciodata rezolvat in nume */
+            e.name = findTableName(DRW::BLOCK_RECORD, e.blockH.ref);
             intfa.addDimRadial(&e);
             break; }
         case 26: {
             DRW_DimDiametric e;
             ENTRY_PARSE(e)
             e.style = findTableName(DRW::DIMSTYLE, e.dimStyleH.ref);
+            /* patch dxfrw_c: blocul de geometrie al cotei era citit ca handle, dar niciodata rezolvat in nume */
+            e.name = findTableName(DRW::BLOCK_RECORD, e.blockH.ref);
             intfa.addDimDiametric(&e);
             break; }
         case 45: {
@@ -1211,7 +1469,7 @@ bool dwgReader::readDwgObject(dwgBuffer *dbuf, objHandle& obj, DRW_Interface& in
         if (version > DRW::AC1021) {//2010+
             bs = dbuf->getUModularChar();
         }
-        duint8 *tmpByteStr = new duint8[size];
+        duint8 *tmpByteStr = new duint8[size]();
         dbuf->getBytes(tmpByteStr, size);
         //verify if getBytes is ok:
         if (!dbuf->isGood()){
@@ -1277,7 +1535,7 @@ int unkData=0;
 //add 2 for modelspace, paperspace blocks & bylayer, byblock linetypes
     numEntries = ((oType == 48) || (oType == 56)) ? (numEntries +2) : numEntries;
 
-    for (int i =0; i< numEntries; i++){
+    for (int i =0; (i< numEntries) && buf->isGood(); i++){
         objectH = buf->getOffsetHandle(handle);
         if (objectH.ref != 0) //in vports R14  I found some NULL handles
             hadlesList.push_back (objectH.ref);
@@ -1285,7 +1543,7 @@ int unkData=0;
         DRW_DBG("Remaining bytes: "); DRW_DBG(buf->numRemainingBytes()); DRW_DBG("\n");
     }
 
-    for (int i =0; i< unkData; i++){
+    for (int i =0; (i< unkData) && buf->isGood(); i++){
         objectH = buf->getOffsetHandle(handle);
         DRW_DBG(" unknown Handle: "); DRW_DBGHL(objectH.code, objectH.size, objectH.ref); DRW_DBG("\n");
         DRW_DBG("Remaining bytes: "); DRW_DBG(buf->numRemainingBytes()); DRW_DBG("\n");

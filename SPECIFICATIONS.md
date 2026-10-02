@@ -106,7 +106,9 @@ libdxfrw/
 ├── dwg2dxf/                  # DWG to DXF converter tool
 ├── dwg2text/                 # DWG to text extractor tool
 ├── bin/                      # Executable scripts
-└── vs2013/                   # Visual Studio 2013 project
+├── tests/                    # Unit tests (CTest)
+├── docker/                   # Linux build images
+└── CMakeLists.txt            # Build configuration
 ```
 
 ---
@@ -252,6 +254,15 @@ virtual void linkImage(const DRW_ImageDef *data) = 0;
 virtual void addComment(const char* comment) = 0;
 ```
 
+##### Optional (dxfrw_c fork, empty by default)
+
+```cpp
+virtual void addAttdef(const DRW_Attdef& data);     // attribute definitions (ATTDEF)
+virtual void addMLeader(const DRW_MLeader* data);   // MULTILEADER
+```
+
+The attributes of an insert (ATTRIB) are delivered in `DRW_Insert::attributes`.
+
 ##### Writing Methods
 
 ```cpp
@@ -271,60 +282,30 @@ virtual void writeAppId() = 0;
 
 ## Build Systems
 
-### 1. Autotools (Recommended)
+CMake is the only build system (Autotools, Visual Studio 2013 and `makefile.mingw` were removed in the dxfrw_c fork).
 
 ```bash
-autoreconf -vfi
-./configure
-make
-sudo make install
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build
+cmake --install build --prefix <prefix>
 ```
 
-#### Configuration Files
-- `configure.ac`: Autoconf configuration
-- `Makefile.am`: Automake templates
-- Library version: 0.6.3 (CURRENT=6, REVISION=3, AGE=0)
+- Minimum CMake version: 3.13
+- Targets: static library `dxfrw`, tools `dwg2dxf` and `dwg2text`, 13 unit tests
+- Options: `LIBDXFRW_BUILD_TESTS`, `LIBDXFRW_BUILD_TOOLS`, `LIBDXFRW_STATIC_RUNTIME` (MinGW)
+- Installation paths: `include/` (and `include/intern/`), `lib/`, `bin/`, `share/doc/libdxfrw/`
+- Dependencies: none (iconv is no longer used)
 
-#### Dependencies
-- **Required**: libiconv (character conversion)
-- **Standard Library**: stdlib.h, string.h
-- **Math Functions**: sqrt()
-
-### 2. CMake
+### Docker
 
 ```bash
-mkdir build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release
-sudo cmake --build . --config Release --target install
+./docker/build-docker.sh run ubuntu
 ```
 
-#### Key CMake Settings
-- Minimum CMake version: 3.10
-- Build target: Static library `dxfrw`
-- Installation paths:
-  - Headers: `include/`
-  - Library: `lib/` (Linux/macOS), `Debug/lib/` or `Release/lib/` (Windows)
-
-### 3. Visual Studio 2013
-
-- Solution file: `vs2013/libdxfrw.sln`
-- Project file: `vs2013/libdxfrw.vcxproj`
-- NuGet package: libiconv 1.14.0.11
-
-### 4. Docker
-
-```bash
-# Build image
-docker build --rm -t codelibs/libdxfrw .
-
-# Build library
-docker run -t --rm -v `pwd`:/work codelibs/libdxfrw:latest /work/build.sh
-```
-
-- Base image: CentOS 7
-- Output: `dxfrw.tar.gz` (install location: `/opt`)
+- Images: AlmaLinux 9, Ubuntu 22.04, Amazon Linux 2023, Alpine (`docker/Dockerfile.*`)
+- `build.sh` configures, builds, tests and installs with CMake into `/opt/dxfrw`
+- Output: `dxfrw-<os>.tar.gz`
 
 ---
 

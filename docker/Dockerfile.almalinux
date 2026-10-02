@@ -10,9 +10,7 @@ LABEL description="Build environment for libdxfrw on AlmaLinux 9"
 # Install build dependencies
 RUN dnf -y groupinstall "Development Tools" && \
     dnf -y install \
-    autoconf \
-    automake \
-    libtool \
+    cmake \
     pkg-config \
     && dnf clean all
 

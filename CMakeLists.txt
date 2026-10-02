@@ -1,114 +1,76 @@
-cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
-project(libdxfrw VERSION 0.6.3)
+cmake_minimum_required(VERSION 3.13 FATAL_ERROR)
+project(libdxfrw VERSION 0.6.3 LANGUAGES CXX)
 
-# Enable testing
-enable_testing()
+option(LIBDXFRW_BUILD_TESTS "Build the unit tests" ON)
+option(LIBDXFRW_BUILD_TOOLS "Build the dwg2dxf and dwg2text converters" ON)
+option(LIBDXFRW_STATIC_RUNTIME "MinGW: link the C/C++ runtime statically into the executables" ON)
+option(LIBDXFRW_DEBUG_OUTPUT "Keep the debug messages (dxfRW/dwgR::setDebug); reading is about twice as slow" OFF)
 
-file(GLOB libdxfrw_sources src/*.cpp)
-file(GLOB libdxfrw_headers include/*.h)
-file(GLOB libdxfrw_intern_sources src/intern/*.cpp)
-
-# Find iconv library
-if(WIN32)
-    include_directories(vs2013/packages/libiconv.1.14.0.11/build/native/include)
-    link_directories(vs2013/packages/libiconv.1.14.0.11/build/native/lib)
-    set(ICONV_LIBRARY iconv)
-else()
-    # On Unix-like systems (Linux, macOS)
-    find_package(Iconv REQUIRED)
-    if(Iconv_FOUND)
-        include_directories(${Iconv_INCLUDE_DIRS})
-        set(ICONV_LIBRARY ${Iconv_LIBRARIES})
-    else()
-        # Fallback: try to link against iconv directly
-        set(ICONV_LIBRARY iconv)
-    endif()
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-include_directories(include)
+file(GLOB libdxfrw_sources src/*.cpp)
+file(GLOB libdxfrw_intern_sources src/intern/*.cpp)
+file(GLOB libdxfrw_headers src/*.h)
+file(GLOB libdxfrw_intern_headers src/intern/*.h)
 
+# The library has no external dependencies (iconv is no longer used, see DXFRW_C_PATCHES.md).
 add_library(dxfrw STATIC ${libdxfrw_sources} ${libdxfrw_intern_sources})
-target_link_libraries(dxfrw ${ICONV_LIBRARY})
+target_include_directories(dxfrw PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+  $<INSTALL_INTERFACE:include>)
+if(NOT LIBDXFRW_DEBUG_OUTPUT)
+  target_compile_definitions(dxfrw PRIVATE DRW_NO_DEBUG)
+endif()
+if(MSVC)
+  target_compile_options(dxfrw PRIVATE /utf-8)
+  target_compile_definitions(dxfrw PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 
+install(TARGETS dxfrw
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib)
+# Public headers; the intern/ headers are needed by applications that use the UTF-8 path helpers
 install(FILES ${libdxfrw_headers} DESTINATION include)
+install(FILES ${libdxfrw_intern_headers} DESTINATION include/intern)
+install(FILES COPYING README.md DXFRW_C_PATCHES.md DESTINATION share/doc/libdxfrw)
 
-if(WIN32)
-  install(TARGETS dxfrw
-          CONFIGURATIONS Debug
-          LIBRARY DESTINATION Debug/lib
-          ARCHIVE DESTINATION Debug/lib)
-  install(TARGETS dxfrw
-          CONFIGURATIONS Release
-          LIBRARY DESTINATION Release/lib
-          ARCHIVE DESTINATION Release/lib)
-else()
-  install(TARGETS dxfrw
-          LIBRARY DESTINATION lib
-          ARCHIVE DESTINATION lib)
+function(libdxfrw_static_runtime target)
+  if(MINGW AND LIBDXFRW_STATIC_RUNTIME)
+    target_link_options(${target} PRIVATE -static $<$<CONFIG:Release>:-s>)
+  endif()
+endfunction()
+
+# Converters
+if(LIBDXFRW_BUILD_TOOLS)
+  add_executable(dwg2dxf dwg2dxf/main.cpp dwg2dxf/dx_iface.cpp)
+  target_link_libraries(dwg2dxf PRIVATE dxfrw)
+  libdxfrw_static_runtime(dwg2dxf)
+
+  add_executable(dwg2text dwg2text/main.cpp dwg2text/dx_iface.cpp)
+  target_link_libraries(dwg2text PRIVATE dxfrw)
+  libdxfrw_static_runtime(dwg2text)
+
+  install(TARGETS dwg2dxf dwg2text RUNTIME DESTINATION bin)
 endif()
 
 # Tests
-add_executable(test_basic tests/test_basic.cpp)
-target_include_directories(test_basic PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_basic dxfrw ${ICONV_LIBRARY})
-add_test(NAME BasicTests COMMAND test_basic)
-
-add_executable(test_entities tests/test_entities.cpp)
-target_include_directories(test_entities PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_entities dxfrw ${ICONV_LIBRARY})
-add_test(NAME EntityTests COMMAND test_entities)
-
-add_executable(test_polylines tests/test_polylines.cpp)
-target_include_directories(test_polylines PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_polylines dxfrw ${ICONV_LIBRARY})
-add_test(NAME PolylineTests COMMAND test_polylines)
-
-add_executable(test_text tests/test_text.cpp)
-target_include_directories(test_text PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_text dxfrw ${ICONV_LIBRARY})
-add_test(NAME TextTests COMMAND test_text)
-
-add_executable(test_tables tests/test_tables.cpp)
-target_include_directories(test_tables PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_tables dxfrw ${ICONV_LIBRARY})
-add_test(NAME TableTests COMMAND test_tables)
-
-add_executable(test_blocks tests/test_blocks.cpp)
-target_include_directories(test_blocks PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_blocks dxfrw ${ICONV_LIBRARY})
-add_test(NAME BlockTests COMMAND test_blocks)
-
-add_executable(test_versions tests/test_versions.cpp)
-target_include_directories(test_versions PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_versions dxfrw ${ICONV_LIBRARY})
-add_test(NAME VersionTests COMMAND test_versions)
-
-add_executable(test_errors tests/test_errors.cpp)
-target_include_directories(test_errors PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_errors dxfrw ${ICONV_LIBRARY})
-add_test(NAME ErrorTests COMMAND test_errors)
-
-add_executable(test_dimensions tests/test_dimensions.cpp)
-target_include_directories(test_dimensions PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_dimensions dxfrw ${ICONV_LIBRARY})
-add_test(NAME DimensionTests COMMAND test_dimensions)
-
-add_executable(test_annotations tests/test_annotations.cpp)
-target_include_directories(test_annotations PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_annotations dxfrw ${ICONV_LIBRARY})
-add_test(NAME AnnotationTests COMMAND test_annotations)
-
-add_executable(test_attributes tests/test_attributes.cpp)
-target_include_directories(test_attributes PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_attributes dxfrw ${ICONV_LIBRARY})
-add_test(NAME AttributeTests COMMAND test_attributes)
-
-add_executable(test_class_underflow tests/test_class_underflow.cpp)
-target_include_directories(test_class_underflow PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_class_underflow dxfrw ${ICONV_LIBRARY})
-add_test(NAME ClassUnderflowTests COMMAND test_class_underflow)
-
-add_executable(test_dwg_classes tests/test_dwg_classes.cpp)
-target_include_directories(test_dwg_classes PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_dwg_classes dxfrw ${ICONV_LIBRARY})
-add_test(NAME DWGClassParsingTests COMMAND test_dwg_classes)
+if(LIBDXFRW_BUILD_TESTS)
+  enable_testing()
+  set(libdxfrw_tests
+    basic:BasicTests entities:EntityTests polylines:PolylineTests text:TextTests tables:TableTests
+    blocks:BlockTests versions:VersionTests errors:ErrorTests dimensions:DimensionTests
+    annotations:AnnotationTests attributes:AttributeTests class_underflow:ClassUnderflowTests
+    dwg_classes:DWGClassParsingTests)
+  foreach(entry ${libdxfrw_tests})
+    string(REPLACE ":" ";" parts ${entry})
+    list(GET parts 0 name)
+    list(GET parts 1 test_name)
+    add_executable(test_${name} tests/test_${name}.cpp)
+    target_include_directories(test_${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_link_libraries(test_${name} PRIVATE dxfrw)
+    libdxfrw_static_runtime(test_${name})
+    add_test(NAME ${test_name} COMMAND test_${name})
+  endforeach()
+endif()

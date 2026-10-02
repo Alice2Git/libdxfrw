@@ -85,32 +85,55 @@ void dwgRSCodec::decode251I(unsigned char *in, unsigned char *out, duint32 blk){
     }
 }
 
+/* patch dxfrw_c: decompresorul R2004+ rescris cu verificari de limite.
+   Varianta originala citea/scria in afara bufferelor pe fisiere corupte (crash) si
+   buclele pentru lungimi nu se opreau la sfarsitul datelor comprimate. */
+duint8 dwgCompressor::getC(){
+    if (pos < sizeC)
+        return bufC[pos++];
+    ++pos;
+    failed = true;
+    return 0;
+}
+
+bool dwgCompressor::copyLiterals18(duint32 count){
+    for (duint32 i = 0; i < count; ++i) {
+        if (rpos >= sizeD) {
+            failed = true;
+            return false;
+        }
+        duint8 c = getC();
+        if (failed)
+            return false;
+        bufD[rpos++] = c;
+    }
+    return true;
+}
+
 duint32 dwgCompressor::twoByteOffset(duint32 *ll){
     duint32 cont = 0;
-    duint8 fb = bufC[pos++];
-    cont = (fb >> 2) | (bufC[pos++] << 6);
+    duint8 fb = getC();
+    cont = (fb >> 2) | (getC() << 6);
     *ll = (fb & 0x03);
     return cont;
 }
 
 duint32 dwgCompressor::longCompressionOffset(){
     duint32 cont = 0;
-    duint8 ll = bufC[pos++];
-    while (ll == 0x00){
+    duint8 ll = getC();
+    while (ll == 0x00 && !failed){
         cont += 0xFF;
-        ll = bufC[pos++];
+        ll = getC();
     }
     cont += ll;
     return cont;
 }
 
 duint32 dwgCompressor::long20CompressionOffset(){
-//    duint32 cont = 0;
     duint32 cont = 0x0F;
-    duint8 ll = bufC[pos++];
-    while (ll == 0x00){
-//        cont += 0xFF;
-        ll = bufC[pos++];
+    duint8 ll = getC();
+    while (ll == 0x00 && !failed){
+        ll = getC();
     }
     cont += ll;
     return cont;
@@ -118,7 +141,9 @@ duint32 dwgCompressor::long20CompressionOffset(){
 
 duint32 dwgCompressor::litLength18(){
     duint32 cont=0;
-    duint8 ll = bufC[pos++];
+    duint8 ll = getC();
+    if (failed)
+        return 0;
     //no literal length, this byte is next opCode
     if (ll > 0x0F) {
         pos--;
@@ -127,10 +152,10 @@ duint32 dwgCompressor::litLength18(){
 
     if (ll == 0x00) {
         cont = 0x0F;
-        ll = bufC[pos++];
-        while (ll == 0x00){//repeat until ll != 0x00
+        ll = getC();
+        while (ll == 0x00 && !failed){//repeat until ll != 0x00
             cont +=0xFF;
-            ll = bufC[pos++];
+            ll = getC();
         }
     }
     cont +=ll;
@@ -141,26 +166,22 @@ duint32 dwgCompressor::litLength18(){
 void dwgCompressor::decompress18(duint8 *cbuf, duint8 *dbuf, duint32 csize, duint32 dsize){
     bufC = cbuf;
     bufD = dbuf;
-    sizeC = csize -2;
-    sizeD = dsize;
-    DRW_DBG("dwgCompressor::decompress, last 2 bytes: ");
-    DRW_DBGH(bufC[sizeC]);DRW_DBGH(bufC[sizeC+1]);DRW_DBG("\n");
     sizeC = csize;
+    sizeD = dsize;
+    pos = 0;
+    rpos = 0;
+    failed = false;
+    if (cbuf == NULL || dbuf == NULL || csize < 2)
+        return;
 
-    duint32 compBytes;
-    duint32 compOffset;
-    duint32 litCount;
+    duint32 compBytes = 0;
+    duint32 compOffset = 0;
+    duint32 litCount = litLength18();
+    if (!copyLiterals18(litCount))
+        return;
 
-    pos=0; //current position in compresed buffer
-    rpos=0; //current position in resulting decompresed buffer
-    litCount = litLength18();
-    //copy first lileral lenght
-    for (duint32 i=0; i < litCount; ++i) {
-        bufD[rpos++] = bufC[pos++];
-    }
-
-    while (pos < csize && (rpos < dsize+1)){//rpos < dsize to prevent crash more robust are needed
-        duint8 oc = bufC[pos++]; //next opcode
+    while (!failed && pos < sizeC && rpos < sizeD) {
+        duint8 oc = getC(); //next opcode
         if (oc == 0x10){
             compBytes = longCompressionOffset()+ 9;
             compOffset = twoByteOffset(&litCount) + 0x3FFF;
@@ -176,8 +197,6 @@ void dwgCompressor::decompress18(duint8 *cbuf, duint8 *dbuf, duint32 csize, duin
             compOffset = twoByteOffset(&litCount);
             if (litCount == 0)
                 litCount= litLength18();
-            else
-                oc = 0x00;
         } else if (oc > 0x20 && oc< 0x40){
             compBytes = oc - 0x1E;
             compOffset = twoByteOffset(&litCount);
@@ -185,36 +204,34 @@ void dwgCompressor::decompress18(duint8 *cbuf, duint8 *dbuf, duint32 csize, duin
                 litCount= litLength18();
         } else if ( oc > 0x3F){
             compBytes = ((oc & 0xF0) >> 4) - 1;
-            duint8 ll2 = bufC[pos++];
+            duint8 ll2 = getC();
             compOffset =  (ll2 << 2) | ((oc & 0x0C) >> 2);
             litCount = oc & 0x03;
             if (litCount < 1){
                 litCount= litLength18();}
         } else if (oc == 0x11){
-            DRW_DBG("dwgCompressor::decompress, end of input stream, Cpos: ");
-            DRW_DBG(pos);DRW_DBG(", Dpos: ");DRW_DBG(rpos);DRW_DBG("\n");
+            DRW_DBG("dwgCompressor::decompress, end of input stream\n");
             return; //end of input stream
         } else { //ll < 0x10
-            DRW_DBG("WARNING dwgCompressor::decompress, failed, illegal char, Cpos: ");
-            DRW_DBG(pos);DRW_DBG(", Dpos: ");DRW_DBG(rpos);DRW_DBG("\n");
+            DRW_DBG("WARNING dwgCompressor::decompress, failed, illegal char\n");
             return; //fails, not valid
         }
-        //copy "compresed data", TODO Needed verify out of bounds
-        duint32 remaining = sizeD - (litCount+rpos);
-        if (remaining < compBytes){
-            compBytes = remaining;
-            DRW_DBG("WARNING dwgCompressor::decompress, bad compBytes size, Cpos: ");
-            DRW_DBG(pos);DRW_DBG(", Dpos: ");DRW_DBG(rpos);DRW_DBG("\n");
+        if (failed)
+            return;
+        //copy "compresed data" (referinta inapoi trebuie sa fie in datele deja decomprimate)
+        if (compOffset >= rpos) {
+            DRW_DBG("WARNING dwgCompressor::decompress, invalid back reference\n");
+            failed = true;
+            return;
         }
-        for (duint32 i=0, j= rpos - compOffset -1; i < compBytes; i++) {
+        duint32 j = rpos - compOffset - 1;
+        for (duint32 i = 0; i < compBytes && rpos < sizeD; i++) {
             bufD[rpos++] = bufD[j++];
         }
-        //copy "uncompresed data", TODO Needed verify out of bounds
-        for (duint32 i=0; i < litCount; i++) {
-            bufD[rpos++] = bufC[pos++];
-        }
+        //copy "uncompresed data"
+        if (!copyLiterals18(litCount))
+            return;
     }
-    DRW_DBG("WARNING dwgCompressor::decompress, bad out, Cpos: ");DRW_DBG(pos);DRW_DBG(", Dpos: ");DRW_DBG(rpos);DRW_DBG("\n");
 }
 
 
@@ -234,16 +251,19 @@ void dwgCompressor::decrypt18Hdr(duint8 *buf, duint32 size, duint32 offset){
         *pHdr++ ^= secMask;
 }*/
 
-duint32 dwgCompressor::litLength21(duint8 *cbuf, duint8 oc, duint32 *si){
+/* patch dxfrw_c: varianta cu limite; csize opreste citirea in afara datelor comprimate */
+duint32 dwgCompressor::litLength21(duint8 *cbuf, duint8 oc, duint32 *si, duint32 csize){
 
     duint32 srcIndex=*si;
 
     duint32 length = oc + 8;
     if (length == 0x17) {
+        if (srcIndex >= csize) { *si = csize; return 0; }
         duint32 n = cbuf[srcIndex++];
         length += n;
         if (n == 0xff) {
             do {
+                if (srcIndex + 2 > csize) { *si = csize; return 0; }
                 n = cbuf[srcIndex++];
                 n |= (duint32)(cbuf[srcIndex++] << 8);
                 length += n;
@@ -262,23 +282,36 @@ void dwgCompressor::decompress21(duint8 *cbuf, duint8 *dbuf, duint32 csize, duin
     duint32 sourceOffset;
     duint8 opCode;
 
+    if (cbuf == NULL || dbuf == NULL || csize < 2 || dsize == 0)
+        return;
     opCode = cbuf[srcIndex++];
     if ((opCode >> 4) == 2){
         srcIndex = srcIndex +2;
+        if (srcIndex >= csize)
+            return;
         length = cbuf[srcIndex++] & 0x07;
     }
 
-    while (srcIndex < csize && (dstIndex < dsize+1)){//dstIndex < dsize to prevent crash more robust are needed
+    while (srcIndex < csize && dstIndex < dsize){
         if (length == 0)
-            length = litLength21(cbuf, opCode, &srcIndex);
+            length = litLength21(cbuf, opCode, &srcIndex, csize);
+        /* patch dxfrw_c: copierea literala nu era limitata nici de datele comprimate, nici de bufferul
+           de iesire (depasire de buffer pe fisiere reale R2007) */
+        if (srcIndex >= csize)
+            break;
+        if (length > csize - srcIndex)
+            length = csize - srcIndex;
+        if (length > dsize - dstIndex)
+            length = dsize - dstIndex;
         copyCompBytes21(cbuf, dbuf, length, srcIndex, dstIndex);
         srcIndex += length;
         dstIndex += length;
         if (dstIndex >=dsize) break; //check if last chunk are compresed & terminate
 
         length = 0;
+        if (srcIndex >= csize) break; /* patch dxfrw_c */
         opCode = cbuf[srcIndex++];
-        readInstructions21(cbuf, &srcIndex, &opCode, &sourceOffset, &length);
+        readInstructions21(cbuf, &srcIndex, &opCode, &sourceOffset, &length, csize);
         while (true) {
             //prevent crash with corrupted data
             if (sourceOffset > dstIndex){
@@ -303,6 +336,7 @@ void dwgCompressor::decompress21(duint8 *cbuf, duint8 *dbuf, duint32 csize, duin
             if ((length != 0) || (srcIndex >= csize)) {
                 break;
             }
+            if (srcIndex >= csize) break; /* patch dxfrw_c */
             opCode = cbuf[srcIndex++];
             if ((opCode >> 4) == 0) {
                 break;
@@ -310,18 +344,33 @@ void dwgCompressor::decompress21(duint8 *cbuf, duint8 *dbuf, duint32 csize, duin
             if ((opCode >> 4) == 15) {
                 opCode &= 15;
             }
-            readInstructions21(cbuf, &srcIndex, &opCode, &sourceOffset, &length);
+            readInstructions21(cbuf, &srcIndex, &opCode, &sourceOffset, &length, csize);
         }
     }
     DRW_DBG("\ncsize = "); DRW_DBG(csize); DRW_DBG("  srcIndex = "); DRW_DBG(srcIndex);
     DRW_DBG("\ndsize = "); DRW_DBG(dsize); DRW_DBG("  dstIndex = "); DRW_DBG(dstIndex);DRW_DBG("\n");
 }
 
-void dwgCompressor::readInstructions21(duint8 *cbuf, duint32 *si, duint8 *oc, duint32 *so, duint32 *l){
+/* patch dxfrw_c: varianta cu limite (csize); la depasire se intoarce lungime 0 si srcIndex = csize */
+void dwgCompressor::readInstructions21(duint8 *cbuf, duint32 *si, duint8 *oc, duint32 *so, duint32 *l, duint32 csize){
     duint32 length;
     duint32 srcIndex = *si;
     duint32 sourceOffset;
     unsigned char opCode = *oc;
+    /* patch dxfrw_c: fiecare ramura are nevoie de alt numar de octeti (1, 2, 3 sau 4). Verificarea
+       anterioara cerea 4 pentru toate, deci o instructiune legitima de la sfarsitul unei pagini
+       comprimate (cu 1-3 octeti ramasi) era abandonata: ultima copiere lipsea, iar pagina se termina
+       cu zerouri (obiecte DWG 2007 corupte, de ex. polilinii 3D fara vertecsi). */
+    duint32 need;
+    switch (opCode >> 4) {
+    case 0: case 1: need = 2; break;
+    case 2: need = (opCode & 8) ? 4 : 3; break;
+    default: need = 1; break;
+    }
+    if (srcIndex > csize || need > csize - srcIndex) {
+        *si = csize; *so = 0; *l = 0;
+        return;
+    }
     switch ((opCode >> 4)) {
     case 0:
         length = (opCode & 0xf) + 0x13;
@@ -420,6 +469,7 @@ void dwgCompressor::copyCompBytes21(duint8 *cbuf, duint8 *dbuf, duint32 l, duint
         for (int i = 1; i<5;i++)
             dbuf[dix++] = cbuf[six+i];
         dbuf[dix] = cbuf[six];
+        break; /* patch dxfrw_c: lipsea break, se scriau inca 8 octeti (depasire de buffer) */
     case 8: //Ok
         for (int i = 0; i<8;i++) //RLZ 4[0],4[4] or 4[4],4[0]
             dbuf[dix++] = cbuf[six++];

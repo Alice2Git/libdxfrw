@@ -64,9 +64,9 @@ bool dwgReader21::parseSysPage(duint64 sizeCompressed, duint64 sizeUncompressed,
 
     if (! fileBuf->setPosition(offset))
         return false;
-    duint8 *tmpDataRaw = new duint8[fpsize];
+    duint8 *tmpDataRaw = new duint8[fpsize]();
     fileBuf->getBytes(tmpDataRaw, fpsize);
-    duint8 *tmpDataRS = new duint8[fpsize];
+    duint8 *tmpDataRS = new duint8[fpsize]();
     dwgRSCodec::decode239I(tmpDataRaw, tmpDataRS, fpsize/255);
     dwgCompressor::decompress21(tmpDataRS, decompData, sizeCompressed, sizeUncompressed);
     delete[]tmpDataRaw;
@@ -81,7 +81,13 @@ bool dwgReader21::parseDataPage(dwgSectionInfo si, duint8 *dData){
         if (!fileBuf->setPosition(pi.address))
             return false;
 
-        duint8 *tmpPageRaw = new duint8[pi.size];
+        /* patch dxfrw_c: dimensiunile vin din fisier; fara validare, decompresia scria in afara
+           bufferului sectiunii (corupere de memorie pe fisiere R2007 reale) */
+        if (pi.size == 0 || pi.size > 256u * 1024u * 1024u)
+            return false;
+        if (static_cast<duint64>(pi.startOffset) + pi.uSize > si.size)
+            return false;
+        duint8 *tmpPageRaw = new duint8[pi.size]();
         fileBuf->getBytes(tmpPageRaw, pi.size);
     #ifdef DRW_DBG_DUMP
         DRW_DBG("\nSection OBJECTS raw data=\n");
@@ -92,7 +98,7 @@ bool dwgReader21::parseDataPage(dwgSectionInfo si, duint8 *dData){
         } DRW_DBG("\n");
     #endif
 
-        duint8 *tmpPageRS = new duint8[pi.size];
+        duint8 *tmpPageRS = new duint8[pi.size]();
         duint8 chunks =pi.size / 255;
         dwgRSCodec::decode251I(tmpPageRaw, tmpPageRS, chunks);
     #ifdef DRW_DBG_DUMP
@@ -107,7 +113,8 @@ bool dwgReader21::parseDataPage(dwgSectionInfo si, duint8 *dData){
         DRW_DBG("\npage uncomp size: "); DRW_DBG(pi.uSize); DRW_DBG(" comp size: "); DRW_DBG(pi.cSize);
         DRW_DBG("\noffset: "); DRW_DBG(pi.startOffset);
         duint8 *pageData = dData + pi.startOffset;
-        dwgCompressor::decompress21(tmpPageRS, pageData, pi.cSize, pi.uSize);
+        duint32 cSize = pi.cSize > pi.size ? pi.size : pi.cSize; /* patch dxfrw_c: cSize nu poate depasi pagina citita */
+        dwgCompressor::decompress21(tmpPageRS, pageData, cSize, pi.uSize);
 
     #ifdef DRW_DBG_DUMP
         DRW_DBG("\n\nSection OBJECTS decompresed data=\n");
@@ -158,13 +165,13 @@ bool dwgReader21::readFileHeader() {
     duint8 *fileHdrData;
     if (fileHdrCompLength < 0) {
         fileHdrDataLength = fileHdrCompLength * -1;
-        fileHdrData = new duint8[fileHdrDataLength];
+        fileHdrData = new duint8[fileHdrDataLength]();
         fileHdrBuf.getBytes(fileHdrData, fileHdrDataLength);
     }else {
         DRW_DBG("\ndwgReader21:: file header are compresed:\n");
-        duint8 *compByteStr = new duint8[fileHdrCompLength];
+        duint8 *compByteStr = new duint8[fileHdrCompLength]();
         fileHdrBuf.getBytes(compByteStr, fileHdrCompLength);
-        fileHdrData = new duint8[fileHdrDataLength];
+        fileHdrData = new duint8[fileHdrDataLength]();
         dwgCompressor::decompress21(compByteStr, fileHdrData, fileHdrCompLength, fileHdrDataLength);
         delete[] compByteStr;
     }
@@ -226,7 +233,7 @@ bool dwgReader21::readFileHeader() {
     delete[] fileHdrData;
 
     DRW_DBG("\ndwgReader21::parse page map:\n");
-    duint8 *PagesMapData = new duint8[PagesMapSizeUncompressed];
+    duint8 *PagesMapData = new duint8[PagesMapSizeUncompressed]();
 
     bool ret = parseSysPage(PagesMapSizeCompressed, PagesMapSizeUncompressed, PagesMapCorrectionFactor, 0x480+PagesMapOffset, PagesMapData);
     if (!ret) {
@@ -257,11 +264,13 @@ bool dwgReader21::readFileHeader() {
     delete[]PagesMapData;
 
     DRW_DBG("\n*** dwgReader21: Processing Section Map ***\n");
-    duint8 *SectionsMapData = new duint8[SectionsMapSizeUncompressed];
+    duint8 *SectionsMapData = new duint8[SectionsMapSizeUncompressed]();
     dwgPageInfo sectionMap = sectionPageMapTmp[SectionsMapId];
     ret = parseSysPage(SectionsMapSizeCompressed, SectionsMapSizeUncompressed, SectionsMapCorrectionFactor, sectionMap.address, SectionsMapData);
-    if (!ret)
+    if (!ret) {
+        delete[] SectionsMapData; /* patch dxfrw_c */
         return false;
+    }
 
 //reads sections:
     //Note: compressed value are not stored in file then, commpresed field are use to store
@@ -288,7 +297,15 @@ bool dwgReader21::readFileHeader() {
         secInfo.name = SectionsMapBuf.getUCSStr(SectionNameLength);
         DRW_DBG("\nSection name = "); DRW_DBG(secInfo.name); DRW_DBG("\n");
 
-        for (unsigned int i=0; i< secInfo.pageCount; i++){
+        /* patch dxfrw_c: numarul de pagini vine din fisier; fiecare pagina consuma 7 valori pe 64 de biti.
+           Fara verificare, bucla citea dupa sfarsitul datelor si umplea harta cu pagini inexistente
+           (citire foarte lenta si corupere de memorie la decompresie). */
+        if (static_cast<duint64>(secInfo.pageCount) * 56 > static_cast<duint64>(SectionsMapBuf.numRemainingBytes())) {
+            DRW_DBG("\nWARNING: pageCount incompatibil cu dimensiunea hartii de sectiuni\n");
+            delete[] SectionsMapData;
+            return false;
+        }
+        for (unsigned int i=0; i< secInfo.pageCount && SectionsMapBuf.isGood(); i++){
             duint64 po = SectionsMapBuf.getRawLong64();
             duint32 ds = SectionsMapBuf.getRawLong64();
             duint32 pn = SectionsMapBuf.getRawLong64();
@@ -332,7 +349,7 @@ bool dwgReader21::readDwgHeader(DRW_Header& hdr){
     if (si.Id<0)//not found, ends
         return false;
     DRW_DBG("\nprepare section of size "); DRW_DBG(si.size);DRW_DBG("\n");
-    duint8 *tmpHeaderData = new duint8[si.size];
+    duint8 *tmpHeaderData = new duint8[si.size]();
     bool ret = dwgReader21::parseDataPage(si, tmpHeaderData);
     if (!ret) {
         delete[]tmpHeaderData;
@@ -355,7 +372,7 @@ bool dwgReader21::readDwgClasses(){
         return false;
 
     DRW_DBG("\nprepare section of size "); DRW_DBG(si.size);DRW_DBG("\n");
-    duint8 *tmpClassesData = new duint8[si.size];
+    duint8 *tmpClassesData = new duint8[si.size]();
     bool ret = dwgReader21::parseDataPage(si, tmpClassesData);
     if (!ret)
         return ret;
@@ -441,7 +458,7 @@ bool dwgReader21::readDwgHandles(){
         return false;
 
     DRW_DBG("\nprepare section of size "); DRW_DBG(si.size);DRW_DBG("\n");
-    duint8 *tmpHandlesData = new duint8[si.size];
+    duint8 *tmpHandlesData = new duint8[si.size]();
     bool ret = dwgReader21::parseDataPage(si, tmpHandlesData);
     if (!ret)
         return ret;
@@ -466,7 +483,7 @@ bool dwgReader21::readDwgTables(DRW_Header& hdr) {
 
     DRW_DBG("\nprepare section of size "); DRW_DBG(si.size);DRW_DBG("\n");
     dataSize = si.size;
-    objData = new duint8 [dataSize];
+    objData = new duint8[dataSize]();
     bool ret = dwgReader21::parseDataPage(si, objData);
     if (!ret)
         return ret;

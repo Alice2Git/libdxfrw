@@ -11,6 +11,9 @@
 ******************************************************************************/
 
 #include "drw_header.h"
+#include <ctime>
+#include <cstdio>
+#include <cstdlib>
 #include "intern/dxfreader.h"
 #include "intern/dxfwriter.h"
 #include "intern/drw_dbg.h"
@@ -35,6 +38,11 @@ void DRW_Header::parseCode(int code, dxfReader *reader){
         name = reader->getString();
         if (version < DRW::AC1015 && name == "$DIMUNIT")
             name="$DIMLUNIT";
+        { /* patch dxfrw_c: o variabila duplicata o suprascria pe cea veche fara eliberare */
+            std::map<std::string, DRW_Variant*>::iterator old = vars.find(name);
+            if (old != vars.end())
+                delete old->second;
+        }
         vars[name]=curr;
         break;
     case 1:
@@ -263,7 +271,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
     writer->writeString(9, "$TEXTSTYLE");
     if (getStr("$TEXTSTYLE", &varStr))
         if (ver == DRW::AC1009)
-            writer->writeUtf8Caps(7, varStr);
+            writer->writeSymbolName(7, varStr);
         else
             writer->writeUtf8String(7, varStr);
     else
@@ -271,7 +279,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
     writer->writeString(9, "$CLAYER");
     if (getStr("$CLAYER", &varStr))
         if (ver == DRW::AC1009)
-            writer->writeUtf8Caps(8, varStr);
+            writer->writeSymbolName(8, varStr);
         else
             writer->writeUtf8String(8, varStr);
     else
@@ -279,7 +287,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
     writer->writeString(9, "$CELTYPE");
     if (getStr("$CELTYPE", &varStr))
         if (ver == DRW::AC1009)
-            writer->writeUtf8Caps(6, varStr);
+            writer->writeSymbolName(6, varStr);
         else
             writer->writeUtf8String(6, varStr);
     else
@@ -405,7 +413,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
     writer->writeString(9, "$DIMBLK");
     if (getStr("$DIMBLK", &varStr))
         if (ver == DRW::AC1009)
-            writer->writeUtf8Caps(1, varStr);
+            writer->writeSymbolName(1, varStr);
         else
             writer->writeUtf8String(1, varStr);
     else
@@ -484,7 +492,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
     writer->writeString(9, "$DIMBLK1");
     if (getStr("$DIMBLK1", &varStr))
         if (ver == DRW::AC1009)
-            writer->writeUtf8Caps(1, varStr);
+            writer->writeSymbolName(1, varStr);
         else
             writer->writeUtf8String(1, varStr);
     else
@@ -492,7 +500,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
     writer->writeString(9, "$DIMBLK2");
     if (getStr("$DIMBLK2", &varStr))
         if (ver == DRW::AC1009)
-            writer->writeUtf8Caps(1, varStr);
+            writer->writeSymbolName(1, varStr);
         else
             writer->writeUtf8String(1, varStr);
     else
@@ -500,7 +508,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
     writer->writeString(9, "$DIMSTYLE");
     if (getStr("$DIMSTYLE", &varStr))
         if (ver == DRW::AC1009)
-            writer->writeUtf8Caps(2, varStr);
+            writer->writeSymbolName(2, varStr);
         else
             writer->writeUtf8String(2, varStr);
     else
@@ -595,7 +603,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
         writer->writeString(9, "$DIMTXSTY");
         if (getStr("$DIMTXSTY", &varStr))
             if (ver == DRW::AC1009)
-                writer->writeUtf8Caps(7, varStr);
+                writer->writeSymbolName(7, varStr);
             else
                 writer->writeUtf8String(7, varStr);
         else
@@ -638,7 +646,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
         writer->writeString(9, "$DIMLDRBLK");
         if (getStr("$DIMLDRBLK", &varStr))
             if (ver == DRW::AC1009)
-                writer->writeUtf8Caps(1, varStr);
+                writer->writeSymbolName(1, varStr);
             else
                 writer->writeUtf8String(1, varStr);
         else
@@ -708,7 +716,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
             writer->writeString(9, "$DIMLTYPE");
             if (getStr("$DIMLTYPE", &varStr))
                 if (ver == DRW::AC1009)
-                    writer->writeUtf8Caps(6, varStr);
+                    writer->writeSymbolName(6, varStr);
                 else
                     writer->writeUtf8String(6, varStr);
             else
@@ -716,7 +724,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
             writer->writeString(9, "$DIMLTEX1");
             if (getStr("$DIMLTEX1", &varStr))
                 if (ver == DRW::AC1009)
-                    writer->writeUtf8Caps(6, varStr);
+                    writer->writeSymbolName(6, varStr);
                 else
                     writer->writeUtf8String(6, varStr);
             else
@@ -724,7 +732,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
             writer->writeString(9, "$DIMLTEX2");
             if (getStr("$DIMLTEX2", &varStr))
                 if (ver == DRW::AC1009)
-                    writer->writeUtf8Caps(6, varStr);
+                    writer->writeSymbolName(6, varStr);
                 else
                     writer->writeUtf8String(6, varStr);
             else
@@ -901,9 +909,34 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
         } else
             writer->writeInt16(70, 1);
     }
+    /* patch dxfrw_c: $TDCREATE / $TDUPDATE nu erau scrise deloc; fara ele AutoCAD/TrueView
+       se blocheaza la deschiderea fisierelor R12. Data crearii se pastreaza daca exista si e plauzibila. */
+    {
+        double now = static_cast<double>(time(NULL)) / 86400.0 + 2440587.5; /* data iuliana */
+        double created = now;
+        double d;
+        if (getDouble("$TDCREATE", &d) && d > 2400000.0 && d < 2600000.0)
+            created = d;
+        writer->writeString(9, "$TDCREATE");
+        writer->writeDouble(40, created);
+        writer->writeString(9, "$TDUPDATE");
+        writer->writeDouble(40, now);
+    }
+    /* patch dxfrw_c: $HANDSEED trebuie sa depaseasca orice handle din fisier; valoarea poate fi
+       furnizata de apelant ca variabila $HANDSEED (hex), altfel 20000 ca inainte. */
     writer->writeString(9, "$HANDSEED");
-    //RLZ        dxfHex(5, 0xFFFF);
-    writer->writeString(5, "20000");
+    {
+        unsigned long seed = 0x20000UL;
+        std::string hs;
+        if (getStr("$HANDSEED", &hs) && !hs.empty()) {
+            unsigned long v = strtoul(hs.c_str(), NULL, 16);
+            if (v > seed)
+                seed = v;
+        }
+        char buf[20];
+        snprintf(buf, sizeof(buf), "%lX", seed);
+        writer->writeString(5, buf);
+    }
     writer->writeString(9, "$SURFTAB1");
     if (getInt("$SURFTAB1", &varInt)) {
         writer->writeInt16(70, varInt);
@@ -933,7 +966,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
     writer->writeString(9, "$UCSBASE");
     if (getStr("$UCSBASE", &varStr))
         if (ver == DRW::AC1009)
-            writer->writeUtf8Caps(2, varStr);
+            writer->writeSymbolName(2, varStr);
         else
             writer->writeUtf8String(2, varStr);
     else
@@ -942,7 +975,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
     writer->writeString(9, "$UCSNAME");
     if (getStr("$UCSNAME", &varStr))
         if (ver == DRW::AC1009)
-            writer->writeUtf8Caps(2, varStr);
+            writer->writeSymbolName(2, varStr);
         else
             writer->writeUtf8String(2, varStr);
     else
@@ -981,7 +1014,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
         writer->writeString(9, "$UCSORTHOREF");
         if (getStr("$UCSORTHOREF", &varStr))
             if (ver == DRW::AC1009)
-                writer->writeUtf8Caps(2, varStr);
+                writer->writeSymbolName(2, varStr);
             else
                 writer->writeUtf8String(2, varStr);
         else
@@ -1054,7 +1087,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
         writer->writeString(9, "$PUCSBASE");
         if (getStr("$PUCSBASE", &varStr))
             if (ver == DRW::AC1009)
-                writer->writeUtf8Caps(2, varStr);
+                writer->writeSymbolName(2, varStr);
             else
                 writer->writeUtf8String(2, varStr);
         else
@@ -1063,7 +1096,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
     writer->writeString(9, "$PUCSNAME");
     if (getStr("$PUCSNAME", &varStr))
         if (ver == DRW::AC1009)
-            writer->writeUtf8Caps(2, varStr);
+            writer->writeSymbolName(2, varStr);
         else
             writer->writeUtf8String(2, varStr);
     else
@@ -1102,7 +1135,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
         writer->writeString(9, "$PUCSORTHOREF");
         if (getStr("$PUCSORTHOREF", &varStr))
             if (ver == DRW::AC1009)
-                writer->writeUtf8Caps(2, varStr);
+                writer->writeSymbolName(2, varStr);
             else
                 writer->writeUtf8String(2, varStr);
         else
@@ -1353,7 +1386,7 @@ void DRW_Header::write(dxfWriter *writer, DRW::Version ver){
         writer->writeString(9, "$CMLSTYLE");
         if (getStr("$CMLSTYLE", &varStr))
             if (ver == DRW::AC1009)
-                writer->writeUtf8Caps(2, varStr);
+                writer->writeSymbolName(2, varStr);
             else
                 writer->writeUtf8String(2, varStr);
         else
@@ -1915,14 +1948,14 @@ bool DRW_Header::parseDwg(DRW::Version version, dwgBuffer *buf, dwgBuffer *hBbuf
     msec = buf->getBitLong();
     while (msec > 0)
         msec /=10;
-    vars["TDCREATE"]=new DRW_Variant(40, day+msec);//RLZ: TODO convert to day.msec
+    vars["$TDCREATE"]=new DRW_Variant(40, day+msec); /* patch dxfrw_c: cheia fara "$" *///RLZ: TODO convert to day.msec
 //    vars["TDCREATE"]=new DRW_Variant(40, buf->getBitLong());//RLZ: TODO convert to day.msec
 //    vars["TDCREATE"]=new DRW_Variant(40, buf->getBitLong());
     day = buf->getBitLong();
     msec = buf->getBitLong();
     while (msec > 0)
         msec /=10;
-    vars["TDUPDATE"]=new DRW_Variant(40, day+msec);//RLZ: TODO convert to day.msec
+    vars["$TDUPDATE"]=new DRW_Variant(40, day+msec); /* patch dxfrw_c: cheia fara "$" *///RLZ: TODO convert to day.msec
 //    vars["TDUPDATE"]=new DRW_Variant(40, buf->getBitLong());//RLZ: TODO convert to day.msec
 //    vars["TDUPDATE"]=new DRW_Variant(40, buf->getBitLong());
     if (version > DRW::AC1015) {//2004+
