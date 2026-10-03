@@ -62,11 +62,12 @@ Every change in the code is marked with the comment `patch dxfrw_c`.
 CMake is the only build system (the former Autotools, Visual Studio 2013 and `makefile.mingw` builds were removed:
 they no longer matched the sources).
 
-**Release binaries and compilers.** The Windows packages in the Releases page (tags `dxfrw_c-*`) are built with
-MinGW-w64 gcc (MSYS2). MSVC is supported as well: the library, the tools and the 13 tests build and pass with both.
-A static library only works with the compiler that built it, so `lib/libdxfrw.a` from those packages is for MinGW-w64
-gcc; for Visual Studio, build the library with MSVC (`dxfrw.lib`). The two-compiler workflow (one machine with gcc,
-one with MSVC) is described in `COMPILARE.md` of the `dxfrw_c` project, in Romanian.
+**One compiler.** On Windows this branch is built only with MinGW-w64 gcc (MSYS2), on every machine it is worked on,
+so that everything downstream (the `dxfrw_c` shim, its .NET and FreeBASIC bindings) always gets the same binaries. The
+packages in the Releases page (tags `dxfrw_c-*`) are all built that way, and the gcc version is in their notes. A static
+library only works with the compiler that built it, so `lib/libdxfrw.a` from those packages is for MinGW-w64 gcc. The
+code also builds with MSVC, and the 13 tests pass (verified with Visual Studio 2026), but that build is not used. The
+full workflow is in `COMPILARE.md` of the `dxfrw_c` project, in Romanian.
 
 ### Linux/macOS
 
@@ -101,8 +102,8 @@ ctest --test-dir build -C Release
 cmake --install build --config Release --prefix C:/libdxfrw
 ```
 
-Verified with Visual Studio Community 2026 (MSVC 14.50). The Visual Studio generator finds the compiler by itself; no
-developer command prompt is needed.
+Verified with Visual Studio Community 2026 (MSVC 14.50); the Visual Studio generator finds the compiler by itself, no
+developer command prompt is needed. This build is only a check: the branch's binaries are built with MinGW-w64 gcc.
 
 Or open the folder in Visual Studio (File → Open → Folder) and build the CMake project.
 
