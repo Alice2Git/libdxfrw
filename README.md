@@ -62,6 +62,12 @@ Every change in the code is marked with the comment `patch dxfrw_c`.
 CMake is the only build system (the former Autotools, Visual Studio 2013 and `makefile.mingw` builds were removed:
 they no longer matched the sources).
 
+**Release binaries and compilers.** The Windows packages in the Releases page (tags `dxfrw_c-*`) are built with
+MinGW-w64 gcc (MSYS2). MSVC is supported as well: the library, the tools and the 13 tests build and pass with both.
+A static library only works with the compiler that built it, so `lib/libdxfrw.a` from those packages is for MinGW-w64
+gcc; for Visual Studio, build the library with MSVC (`dxfrw.lib`). The two-compiler workflow (one machine with gcc,
+one with MSVC) is described in `COMPILARE.md` of the `dxfrw_c` project, in Romanian.
+
 ### Linux/macOS
 
 ```bash
@@ -73,21 +79,30 @@ sudo cmake --install build          # optional: install to /usr/local
 
 ### Windows (MinGW-w64)
 
+With MSYS2, and `C:\msys64\mingw64\bin` and `C:\msys64\usr\bin` in `PATH`:
+
 ```bash
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+cmake -S . -B build -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j 4
+ctest --test-dir build
 cmake --install build --prefix C:/libdxfrw
 ```
+
+The `"MinGW Makefiles"` generator works too when `mingw32-make` is installed.
 
 With MinGW the tools and tests are linked statically against the C/C++ runtime (option `LIBDXFRW_STATIC_RUNTIME`).
 
 ### Windows (Visual Studio)
 
 ```bash
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake -S . -B build -G "Visual Studio 18 2026" -A x64     # Visual Studio 2022: "Visual Studio 17 2022"
 cmake --build build --config Release
+ctest --test-dir build -C Release
 cmake --install build --config Release --prefix C:/libdxfrw
 ```
+
+Verified with Visual Studio Community 2026 (MSVC 14.50). The Visual Studio generator finds the compiler by itself; no
+developer command prompt is needed.
 
 Or open the folder in Visual Studio (File → Open → Folder) and build the CMake project.
 
