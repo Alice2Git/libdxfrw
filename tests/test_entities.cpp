@@ -15,6 +15,7 @@
 #include <iostream>
 #include <cstdio>
 #include <cmath>
+#include <new>
 
 // Helper to compare doubles
 bool doubleEquals(double a, double b, double epsilon = 0.0001) {
@@ -415,6 +416,72 @@ bool testMultipleEntities() {
     return true;
 }
 
+// Builds a T over memory filled with a non-zero byte pattern, so that a member the
+// constructor leaves uninitialized keeps the pattern instead of a lucky zero.
+template <class T>
+class OverPattern {
+public:
+    OverPattern() : mem(fill()), obj(new (mem) T()) {}
+    OverPattern(double x, double y, double z, double b) : mem(fill()), obj(new (mem) T(x, y, z, b)) {}
+    ~OverPattern() { obj->~T(); ::operator delete(mem); }
+    T* operator->() { return obj; }
+private:
+    // volatile: the compiler may treat plain stores made before a constructor as dead
+    // (gcc -flifetime-dse) and remove them
+    static void* fill() {
+        void* m = ::operator new(sizeof(T));
+        volatile unsigned char* p = static_cast<volatile unsigned char*>(m);
+        for (size_t i = 0; i < sizeof(T); ++i) p[i] = 0xA5;
+        return m;
+    }
+    OverPattern(const OverPattern&);
+    OverPattern& operator=(const OverPattern&);
+    void* mem;
+    T* obj;
+};
+
+bool testDefaultValues() {
+    std::cout << "\n=== Test: Defaults of Members Read from Optional Group Codes ===" << std::endl;
+
+    // These members are only set by the reader when their group code is present. The
+    // tangent direction (50) of a VERTEX is only written for curve-fit vertices, and only
+    // read from DWG for 2D vertices, so most vertices used to get whatever was in memory.
+    bool ok = true;
+    struct Check {
+        bool& ok;
+        explicit Check(bool& o) : ok(o) {}
+        void operator()(bool cond, const char* what) {
+            if (!cond) { std::cout << "✗ " << what << std::endl; ok = false; }
+        }
+    } expect(ok);
+
+    { OverPattern<DRW_Vertex> v; expect(v->tgdir == 0.0, "VERTEX tangent direction"); }
+    {
+        OverPattern<DRW_Vertex> v(1.0, 2.0, 0.0, 0.5);
+        expect(v->tgdir == 0.0, "VERTEX(x, y, z, bulge) tangent direction");
+        expect(v->eType == DRW::VERTEX, "VERTEX(x, y, z, bulge) type");
+    }
+    { OverPattern<DRW_Circle> c; expect(c->radious == 0.0, "CIRCLE radius"); }
+    {
+        OverPattern<DRW_Arc> a;
+        expect(a->staangle == 0.0 && a->endangle == 0.0, "ARC angles");
+    }
+    {
+        OverPattern<DRW_Ellipse> e;
+        expect(e->ratio == 1.0 && e->staparam == 0.0 && e->endparam == M_PIx2, "ELLIPSE ratio and parameters (full ellipse)");
+    }
+    { OverPattern<DRW_Text> t; expect(t->height == 0.0, "TEXT height"); }
+    { OverPattern<DRW_MText> t; expect(t->height == 0.0, "MTEXT height"); }
+    { OverPattern<DRW_Attrib> t; expect(t->height == 0.0, "ATTRIB height"); }
+    { OverPattern<DRW_LWPolyline> l; expect(l->vertexnum == 0, "LWPOLYLINE vertex count"); }
+    { OverPattern<DRW_DimRadial> d; expect(d->getLeaderLength() == 0.0, "radial DIMENSION leader length"); }
+    { OverPattern<DRW_DimDiametric> d; expect(d->getLeaderLength() == 0.0, "diametric DIMENSION leader length"); }
+    { OverPattern<DRW_Layer> l; expect(l->handle == 0, "table entry handle"); }
+
+    if (ok) std::cout << "✓ Default values test passed" << std::endl;
+    return ok;
+}
+
 int main(int argc, char* argv[]) {
     std::cout << "libdxfrw Entity Tests" << std::endl;
     std::cout << "=====================" << std::endl;
@@ -439,6 +506,9 @@ int main(int argc, char* argv[]) {
 
     totalTests++;
     if (!testMultipleEntities()) failedTests++;
+
+    totalTests++;
+    if (!testDefaultValues()) failedTests++;
 
     std::cout << "\n=====================" << std::endl;
     std::cout << "Tests: " << (totalTests - failedTests) << "/" << totalTests << " passed" << std::endl;

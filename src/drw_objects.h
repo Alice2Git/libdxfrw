@@ -58,6 +58,9 @@ public:
     //initializes default values
     DRW_TableEntry() {
         tType = DRW::UNKNOWNT;
+        handle = 0;  /* patch dxfrw_c: membri neinitializati */
+        oType = 0;
+        objSize = 0;
         flags = 0;
         numReactors = xDictFlag = 0;
         parentHandle = 0;

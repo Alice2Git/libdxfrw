@@ -187,6 +187,17 @@ Găsite la trecerea aplicației BatchPrint de la IxMilia.Dxf la DxfRw: prima pri
 
 La scriere, rotația MTEXT rămâne în codul 50, în grade. Referința DXF spune radiani, dar AutoCAD folosește grade (la fel tratează codul și ezdxf); AutoCAD însuși scrie vectorul axei X (11/21/31).
 
+### Găsite de testul de rescriere al nivelului 2 FreeBASIC (3 octombrie 2026)
+
+Testul `lot_oop ... rescriere` scrie înapoi fiecare entitate (prin clasele FreeBASIC) și o compară cu cea recitită. Pe lotul de 7.049 de desene a găsit 1.439 de entități diferite după rescriere. Toate cele afișate erau polilinii cu un vertex a cărui direcție a tangentei era NaN, deși fișierele nu conțin codul 50.
+
+| Problemă | Efect | Fișiere |
+|---|---|---|
+| Membri neinițializați: direcția tangentei vertecșilor POLYLINE (50), raza CIRCLE (40), unghiurile ARC (50/51), raportul și parametrii ELLIPSE (40/41/42), înălțimea TEXT/MTEXT/ATTRIB (40), lungimea indicatorului la cote (40) și `hdir`, `vertexnum` la LWPOLYLINE, handle-ul intrărilor de tabel | Codul 50 apare doar la vertecșii curve-fit, iar din DWG se citește doar la vertecșii 2D. Aproape orice vertex POLYLINE din DXF și orice vertex 3D sau polyface din DWG primea o valoare aleatoare din memorie, uneori NaN. La celelalte câmpuri erau afectate doar fișierele cărora le lipsește codul. Acum valorile implicite sunt 0, iar elipsa este completă (raport 1, parametri 0…2π) | `drw_entities.h`, `drw_objects.h` |
+| `DRW_Vertex(x, y, z, bulge)` (folosit la conversia ELLIPSE → POLYLINE în R12) nu seta tipul VERTEX | Tipul rămânea POINT | `drw_entities.h` |
+
+Valorile aleatoare care nu erau NaN treceau neobservate: o valoare copiată exact se compară egal cu ea însăși. Grupul de teste „coduri de grup lipsă” din `freebasic/tests` citește un DXF scris de mână fără aceste coduri și găsea, cu DLL-ul vechi, de exemplu `TangentDirection = 1.0e-316`.
+
 ### Teste ale bibliotecii actualizate
 
 `tests/test_attributes.cpp` verifica explicit vechea limitare („scara de linetype nu se scrie, trebuie să rămână 1.0”). Acum verifică faptul că valoarea 2.5 se păstrează.
@@ -194,6 +205,8 @@ La scriere, rotația MTEXT rămâne în codul 50, în grade. Referința DXF spun
 `tests/test_tables.cpp` (`testLineTypes`) număra doar tipurile de linie recitite; acum verifică și modelul fiecăruia (cu vechiul `reset()`, `DOTTED` ieșea cu elementele lui `DASHED`).
 
 `tests/test_text.cpp` are un test nou, `testDwgMTextRotation`: construiește bit cu bit două entități MTEXT în format DWG R2000 (verticală și la 30°) și verifică rotația citită, fără să aibă nevoie de un fișier DWG.
+
+`tests/test_entities.cpp` are un test nou, `testDefaultValues`: construiește entitățile (și o intrare de tabel) peste memorie umplută cu un tipar nenul și verifică valorile implicite ale câmpurilor citite din coduri opționale. Fără corectura membrilor neinițializați pică la toate cele 13 verificări. Umplerea se face prin scrieri `volatile`, pentru că gcc consideră moarte scrierile obișnuite făcute înaintea constructorului (`-flifetime-dse`) și le poate elimina.
 
 ## Corecturi făcute în shim (nu în bibliotecă)
 

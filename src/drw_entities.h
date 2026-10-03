@@ -316,6 +316,8 @@ class DRW_Circle : public DRW_Point {
 public:
     DRW_Circle() {
         eType = DRW::CIRCLE;
+        /* patch dxfrw_c: membru neinitializat; un DXF fara codul 40 lasa in raza o valoare aleatoare */
+        radious = 0.0;
     }
 
     virtual void applyExtrusion();
@@ -339,6 +341,7 @@ public:
     DRW_Arc() {
         eType = DRW::ARC;
         isccw = 1;
+        staangle = endangle = 0.0;  /* patch dxfrw_c: membri neinitializati (codurile 50/51 lipsa) */
     }
 
     virtual void applyExtrusion();
@@ -381,6 +384,10 @@ public:
     DRW_Ellipse() {
         eType = DRW::ELLIPSE;
         isccw = 1;
+        /* patch dxfrw_c: membri neinitializati; implicit elipsa completa (vezi comentariile campurilor) */
+        ratio = 1.0;
+        staparam = 0.0;
+        endparam = M_PIx2;
     }
 
     void toPolyline(DRW_Polyline *pol, int parts = 128);
@@ -554,6 +561,7 @@ public:
         eType = DRW::LWPOLYLINE;
         elevation = thickness = width = 0.0;
         flags = 0;
+        vertexnum = 0;  /* patch dxfrw_c: membru neinitializat */
         extPoint.x = extPoint.y = 0;
         extPoint.z = 1;
         vertex = NULL;
@@ -565,6 +573,7 @@ public:
         this->thickness = p.thickness;
         this->width = p.width;
         this->flags = p.flags;
+        this->vertexnum = p.vertexnum;  /* patch dxfrw_c: necopiat */
         this->extPoint = p.extPoint;
         this->vertex = NULL;
         for (unsigned i=0; i<p.vertlist.size(); i++)// RLZ ok or new
@@ -640,6 +649,7 @@ public:
 
     DRW_Text() {
         eType = DRW::TEXT;
+        height = 0;  /* patch dxfrw_c: membru neinitializat (codul 40 lipsa) */
         angle = 0;
         widthscale = 1;
         oblique = 0;
@@ -811,14 +821,19 @@ private:
 class DRW_Vertex : public DRW_Point {
     SETENTFRIENDS
 public:
+    /* patch dxfrw_c: directia tangentei (50) era neinitializata; un vertex fara codul 50 (cazul obisnuit,
+       codul apare doar la curve-fit) primea o valoare aleatoare din memorie, uneori NaN */
     DRW_Vertex() {
         eType = DRW::VERTEX;
         stawidth = endwidth = bulge = 0;
+        tgdir = 0;
         vindex1 = vindex2 = vindex3 = vindex4 = 0;
         flags = identifier = 0;
     }
     DRW_Vertex(double sx, double sy, double sz, double b) {
+        eType = DRW::VERTEX;
         stawidth = endwidth = 0;
+        tgdir = 0;
         vindex1 = vindex2 = vindex3 = vindex4 = 0;
         flags = identifier = 0;
         basePoint.x = sx;
@@ -1174,6 +1189,7 @@ public:
         defPoint.z = extPoint.x = extPoint.y = 0;
         textPoint.z = rot = 0;
         clonePoint.x = clonePoint.y = clonePoint.z = 0;
+        hdir = length = 0.0;  /* patch dxfrw_c: membri neinitializati (lungimea indicatorului, cod 40) */
     }
 
     DRW_Dimension(const DRW_Dimension& d): DRW_Entity(d) {
@@ -1197,7 +1213,7 @@ public:
         arcPoint = d.arcPoint;
         circlePoint = d.circlePoint;
         length = d.length;
-        //RLZ needed a def value for this: hdir = ???
+        hdir = d.hdir;  /* patch dxfrw_c: necopiat */
     }
     virtual ~DRW_Dimension() {}
 
