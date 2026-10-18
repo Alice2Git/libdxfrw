@@ -198,11 +198,20 @@ Testul `lot_oop ... rescriere` scrie înapoi fiecare entitate (prin clasele Free
 
 Valorile aleatoare care nu erau NaN treceau neobservate: o valoare copiată exact se compară egal cu ea însăși. Grupul de teste „coduri de grup lipsă” din `freebasic/tests` citește un DXF scris de mână fără aceste coduri și găsea, cu DLL-ul vechi, de exemplu `TangentDirection = 1.0e-316`.
 
-### Teste ale bibliotecii actualizate
+### Găsite de testele TestKit ale legăturii FreeBASIC (18 octombrie 2026)
+
+`freebasic/tests/test_margini.bas` scrie desene în R2018, R2004 binar, R2000 și R12 și le citește înapoi, pe marginile pe care testele de mai sus nu le ating (precizie, texte speciale, Unicode, volum).
+
+| Problemă | Efect | Fișiere |
+|---|---|---|
+| Înainte de R2007, textul non-ASCII se scrie ca `\U+XXXX`, iar citirea ia exact 4 cifre; un caracter peste U+FFFF se scria însă cu 5 (`\U+1F600`) | Emoji și CJK extins se stricau la salvarea în R12–R2004: 😀 se recitea ca U+1F60 urmat de „0”. Acum se scrie perechea de surogate UTF-16 (`\U+D83D\U+DE00`), iar la citire perechea se reunește într-un singur caracter | `intern/drw_textcodec.cpp` |
+
 
 `tests/test_attributes.cpp` verifica explicit vechea limitare („scara de linetype nu se scrie, trebuie să rămână 1.0”). Acum verifică faptul că valoarea 2.5 se păstrează.
 
 `tests/test_tables.cpp` (`testLineTypes`) număra doar tipurile de linie recitite; acum verifică și modelul fiecăruia (cu vechiul `reset()`, `DOTTED` ieșea cu elementele lui `DASHED`).
+
+`tests/test_text.cpp` are și `testNonBmpUnicodeEscape`: scrie un text cu U+1F600 și U+20000 prin cinci pagini de cod (1252, 1250, 932, 936 și una necunoscută), verifică perechile de surogate și recitirea exactă. Pe codul vechi pică.
 
 `tests/test_text.cpp` are un test nou, `testDwgMTextRotation`: construiește bit cu bit două entități MTEXT în format DWG R2000 (verticală și la 30°) și verifică rotația citită, fără să aibă nevoie de un fișier DWG.
 

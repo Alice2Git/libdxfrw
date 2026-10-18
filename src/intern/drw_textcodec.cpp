@@ -105,8 +105,41 @@ void DRW_TextCodec::setCodePage(std::string *c, bool dxfFormat){
     }
 }
 
+/* patch dxfrw_c: secventele \U+XXXX au exact 4 cifre, deci un caracter peste U+FFFF se scrie ca pereche de
+   surogate (decodeText). La citire, fiecare \U+ devine separat UTF-8 (un surogat ocupa 3 octeti,
+   ED A0..BF xx); aici perechea "surogat mare + surogat mic" se reuneste in caracterul de 4 octeti. */
+static std::string joinSurrogates(const std::string &s) {
+    if (s.find('\xED') == std::string::npos)
+        return s;
+    std::string res;
+    res.reserve(s.size());
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = s[i];
+        if (c == 0xED && i + 5 < s.size()) {
+            unsigned char b1 = s[i + 1], b2 = s[i + 2];
+            unsigned char c2 = s[i + 3], d1 = s[i + 4], d2 = s[i + 5];
+            if ((b1 & 0xF0) == 0xA0 && (b2 & 0xC0) == 0x80 &&
+                c2 == 0xED && (d1 & 0xF0) == 0xB0 && (d2 & 0xC0) == 0x80) {
+                int hi = 0xD000 | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
+                int lo = 0xD000 | ((d1 & 0x3F) << 6) | (d2 & 0x3F);
+                int cp = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+                res += (char)(0xF0 | (cp >> 18));
+                res += (char)(0x80 | ((cp >> 12) & 0x3F));
+                res += (char)(0x80 | ((cp >> 6) & 0x3F));
+                res += (char)(0x80 | (cp & 0x3F));
+                i += 6;
+                continue;
+            }
+        }
+        res += (char)c;
+        i++;
+    }
+    return res;
+}
+
 std::string DRW_TextCodec::toUtf8(std::string s) {
-    return conv->toUtf8(&s);
+    return joinSurrogates(conv->toUtf8(&s)); /* patch dxfrw_c */
 }
 
 std::string DRW_TextCodec::fromUtf8(std::string s) {
@@ -209,6 +242,12 @@ std::string DRW_Converter::encodeText(std::string stmp){
 }
 
 std::string DRW_Converter::decodeText(int c){
+    /* patch dxfrw_c: \U+ are exact 4 cifre (la citire se iau 4): peste U+FFFF, perechea de surogate UTF-16.
+       Inainte, U+1F600 iesea "\U+1F600" si se recitea ca U+1F60 urmat de "0". */
+    if (c > 0xFFFF && c <= 0x10FFFF) {
+        int v = c - 0x10000;
+        return decodeText(0xD800 + (v >> 10)) + decodeText(0xDC00 + (v & 0x3FF));
+    }
     std::string res = "\\U+";
     std::string num;
 #if defined(__APPLE__)

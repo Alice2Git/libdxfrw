@@ -381,6 +381,47 @@ bool testDwgMTextRotation() {
     return true;
 }
 
+// Before R2007 non-ASCII text is written as \U+XXXX, always 4 hex digits. A character above
+// U+FFFF must go out as a UTF-16 surrogate pair and come back as one 4-byte UTF-8 character;
+// it used to be written as "\U+1F600" and read back as U+1F60 followed by "0".
+bool testNonBmpUnicodeEscape() {
+    std::cout << "\n=== Test: characters above U+FFFF in \\U+ escapes ===" << std::endl;
+
+    const std::string emoji = "\xF0\x9F\x98\x80";          // U+1F600
+    const std::string cjkB = "\xF0\xA0\x80\x80";           // U+20000
+    const std::string text = "a" + emoji + " b" + cjkB + "\xC4\x83";   // ... + U+0103
+
+    const char* codepages[] = {"ANSI_1252", "ANSI_1250", "ANSI_932", "ANSI_936", "UNKNOWN_CP"};
+    for (const char* cp : codepages) {
+        DRW_TextCodec codec;
+        codec.setVersion(DRW::AC1015, true);
+        codec.setCodePage(std::string(cp), true);
+        std::string written = codec.fromUtf8(text);
+        if (written.find("\\U+D83D\\U+DE00") == std::string::npos ||
+            written.find("\\U+D840\\U+DC00") == std::string::npos) {
+            std::cout << "✗ " << cp << ": no surrogate pairs in '" << written << "'" << std::endl;
+            return false;
+        }
+        std::string reread = codec.toUtf8(written);
+        if (reread != text) {
+            std::cout << "✗ " << cp << ": read back '" << reread << "'" << std::endl;
+            return false;
+        }
+    }
+
+    // a lone surrogate is left alone, a pair split by other text is not joined
+    DRW_TextCodec codec;
+    codec.setVersion(DRW::AC1015, true);
+    codec.setCodePage(std::string("ANSI_1252"), true);
+    if (codec.toUtf8("x\\U+D83Dy\\U+DE00") != "x\xED\xA0\xBDy\xED\xB8\x80") {
+        std::cout << "✗ unpaired surrogates changed" << std::endl;
+        return false;
+    }
+
+    std::cout << "✓ Non-BMP \\U+ escape test passed" << std::endl;
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     std::cout << "libdxfrw Text Entity Tests" << std::endl;
     std::cout << "==========================" << std::endl;
@@ -402,6 +443,9 @@ int main(int argc, char* argv[]) {
 
     totalTests++;
     if (!testDwgMTextRotation()) failedTests++;
+
+    totalTests++;
+    if (!testNonBmpUnicodeEscape()) failedTests++;
 
     std::cout << "\n==========================" << std::endl;
     std::cout << "Tests: " << (totalTests - failedTests) << "/" << totalTests << " passed" << std::endl;
