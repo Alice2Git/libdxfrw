@@ -253,7 +253,7 @@ std::string DRW_Converter::decodeText(int c){
 #if defined(__APPLE__)
     std::string str(16, '\0');
     snprintf (&(str[0]), 16, "%04X", c );
-    num = str;
+    num = str.c_str(); /* patch dxfrw_c: "num = str" copia toti cei 16 octeti, deci 12 NUL dupa cifre in DXF */
 #else
     std::stringstream ss;
     ss << std::uppercase << std::setfill('0') << std::setw(4) << std::hex << c;

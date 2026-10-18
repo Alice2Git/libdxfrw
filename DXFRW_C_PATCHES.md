@@ -205,6 +205,7 @@ Valorile aleatoare care nu erau NaN treceau neobservate: o valoare copiată exac
 | Problemă | Efect | Fișiere |
 |---|---|---|
 | Înainte de R2007, textul non-ASCII se scrie ca `\U+XXXX`, iar citirea ia exact 4 cifre; un caracter peste U+FFFF se scria însă cu 5 (`\U+1F600`) | Emoji și CJK extins se stricau la salvarea în R12–R2004: 😀 se recitea ca U+1F60 urmat de „0”. Acum se scrie perechea de surogate UTF-16 (`\U+D83D\U+DE00`), iar la citire perechea se reunește într-un singur caracter | `intern/drw_textcodec.cpp` |
+| Pe macOS (ramura `__APPLE__` din `decodeText`), cifrele lui `\U+XXXX` se formatau într-un șir de 16 octeți, copiat apoi întreg | Fiecare caracter non-ASCII scris înainte de R2007 era urmat în DXF de 12 octeți NUL. Găsit de CI-ul libdxfrw (macOS) la testul nou; Windows și Linux folosesc cealaltă ramură | `intern/drw_textcodec.cpp` |
 
 
 `tests/test_attributes.cpp` verifica explicit vechea limitare („scara de linetype nu se scrie, trebuie să rămână 1.0”). Acum verifică faptul că valoarea 2.5 se păstrează.
